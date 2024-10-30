@@ -47,7 +47,7 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 		}
 		cur += n + 1
 		items = append(items, %s{})
-		if items[len(items)-1].Scan(a); err != nil {
+		if err = items[len(items)-1].Scan(a); err != nil {
 			return err
 		}
 	}
@@ -238,7 +238,7 @@ func (g *generator) renderSliceParser(t reflect.Type, target string) {
 			}
 			cur += n + 1
 			items = append(items, %s{})
-			if items[len(items)-1].Scan(a); err != nil {
+			if err = items[len(items)-1].Scan(a); err != nil {
 				return err
 			}
 		}
