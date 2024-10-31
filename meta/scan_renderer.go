@@ -270,22 +270,24 @@ func (g *generator) renderSliceParser(t reflect.Type, target string) {
 		if e != nil {
 			return e
 		}
-		str = str[1 : len(str)-1]
 		cur += n
-		var items = make([]%s, 0)
-		for cur := 0; cur < len(str)-1; {
-			var n int
-			var a string
-			if a, n, err = readString(unsafeBytes(str[cur:])); err != nil {
-				return err
+		if len(str) != 0 {
+			str = str[1 : len(str)-1]
+			var items = make([]%s, 0)
+			for cur := 0; cur < len(str)-1; {
+				var n int
+				var a string
+				if a, n, err = readString(unsafeBytes(str[cur:])); err != nil {
+					return err
+				}
+				cur += n + 1
+				items = append(items, %s{})
+				if err = items[len(items)-1].Scan(a); err != nil {
+					return err
+				}
 			}
-			cur += n + 1
-			items = append(items, %s{})
-			if err = items[len(items)-1].Scan(a); err != nil {
-				return err
-			}
+			%s = items
 		}
-		%s = items
 	}
 `, t.Name(), t.Name(), target)
 	g.addImport("bytes", "strings")
