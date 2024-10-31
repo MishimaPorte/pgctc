@@ -38,7 +38,7 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 	sourceBytes = unsafeBytes(source)
 
 	var items = make([]%s, 0)
-	for cur := 0; cur < sourceLen; {
+	for cur := 1; cur < sourceLen; {
 		var n int
 		var a string
 		if a, n, err = readString(sourceBytes[cur:], '}'); err != nil {
