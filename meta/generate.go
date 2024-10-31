@@ -68,6 +68,11 @@ func (g *generator) renderTails() {
 
 func (g *generator) insertTypeForFurtherProcessing(t reflect.Type) {
 	if !slices.Contains(g.seenAlreadyTypes, t) {
+		if t.Kind() == reflect.Slice && t.Name() == "" {
+			// do not need to emit code for unnamed slices, since they cannot be receivers
+			// for names slices, though, we need.
+			return
+		}
 		g.seenAlreadyTypes = append(g.seenAlreadyTypes, t)
 		g.needMoreTypes = append(g.needMoreTypes, t)
 	}
