@@ -15,7 +15,7 @@ func (g *generator) renderPrologue() {
 	}
 	if source[0] == '"' {
 		// delimeter here is bogus
-		if source, _, err = readString(unsafeBytes(source)[1:]); err != nil {
+		if source, _, err = readString(unsafeBytes(source)[1:], EXPECTED_COLON); err != nil {
 			return err
 		}
 	}
@@ -34,7 +34,6 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 	if source[0] != '{' || source[len(source)-1] != '}' {
 		return fmt.Errorf("bad source string: %%q", source)
 	}
-	source = source[1 : len(source)-1]
 	sourceLen = len(source)
 	sourceBytes = unsafeBytes(source)
 
@@ -42,7 +41,7 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 	for cur := 0; cur < sourceLen; {
 		var n int
 		var a string
-		if a, n, err = readString(sourceBytes[cur:]); err != nil {
+		if a, n, err = readString(sourceBytes[cur:], '}'); err != nil {
 			return err
 		}
 		cur += n + 1
@@ -74,11 +73,7 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 			if !field.IsExported() {
 				continue
 			}
-			if i == t.NumField()-1 {
-				g.renderStructField(field.Type, ")", "v.%s", field.Name)
-			} else {
-				g.renderStructField(field.Type, ",", "v.%s", field.Name)
-			}
+			g.renderStructField(field.Type, "v.%s", field.Name)
 		}
 	default:
 		panic("bad type:" + t.String())
@@ -87,17 +82,17 @@ func (g *generator) renderDriverScan(t reflect.Type) {
 	g.fprintf("\treturn nil\n}\n\n")
 }
 
-func (g *generator) renderStringParser(target string) {
+func (g *generator) renderStringParser(target string, delim string) {
 	g.fprintf(`
 	{
-		var next, n, e = readString(sourceBytes[cur:])
+		var next, n, e = readString(sourceBytes[cur:], '%s')
 		if e != nil {
 			return e
 		}
 		cur += n
 		%s = next
 	}
-`, target)
+`, delim, target)
 
 }
 
@@ -108,7 +103,7 @@ const (
 	FLOAT_64
 )
 
-func (g *generator) renderFloatParser(target string, ftype FloatType) {
+func (g *generator) renderFloatParser(target string, delim string, ftype FloatType) {
 	var bitsize int
 	switch ftype {
 	case FLOAT_32:
@@ -122,7 +117,7 @@ func (g *generator) renderFloatParser(target string, ftype FloatType) {
 	g.addImport("strconv")
 	g.fprintf(`
 	{
-		var next, n, e = readString(sourceBytes[cur:])
+		var next, n, e = readString(sourceBytes[cur:], '%s')
 		if e != nil {
 			return e
 		}
@@ -134,15 +129,15 @@ func (g *generator) renderFloatParser(target string, ftype FloatType) {
 		%s = float%d(vfloat)
 	}
 	
-`, bitsize, target, bitsize)
+`, delim, bitsize, target, bitsize)
 
 }
 
-func (g *generator) renderIntegerParser(target string, t reflect.Type) {
+func (g *generator) renderIntegerParser(target string, delim string, t reflect.Type) {
 	g.addImport("strconv")
 	g.fprintf(`
 	{
-		var next, n, e = readString(sourceBytes[cur:])
+		var next, n, e = readString(sourceBytes[cur:], '%s')
 		if e != nil {
 			return e
 		}
@@ -153,17 +148,16 @@ func (g *generator) renderIntegerParser(target string, t reflect.Type) {
 		cur += n
 		%s = %s(answer)
 	}
-`, target, t)
-
+`, delim, target, t)
 }
 
 // Postgres kinda states, that it will never output anything except for
 // "t" or "f" (although supporting a range of strings as boolean identifiers)
 // This is a partial, therefore, but sufficient implementation for postgres.
-func (g *generator) renderBooleanParser(target string) {
+func (g *generator) renderBooleanParser(target string, delim string) {
 	g.fprintf(`
 	{
-		var next, n, e = readString(sourceBytes[cur:])
+		var next, n, e = readString(sourceBytes[cur:], '%s')
 		if e != nil {
 			return e
 		}
@@ -177,7 +171,7 @@ func (g *generator) renderBooleanParser(target string) {
 			panic("bad bool string from postgres: " + next)
 		}
 	}
-`, target, target)
+`, delim, target, target)
 }
 
 func (g *generator) renderFileHeader(packageName string) {
@@ -205,8 +199,9 @@ func unsafeBytes(str string) []byte {
 	return unsafe.Slice(unsafe.StringData(str), len(str))
 }
 
+const EXPECTED_COLON = byte(0)
 // bad
-func readString(b []byte) (res string, read int, err error) {
+func readString(b []byte, delim byte) (res string, read int, err error) {
 	switch b[0] {
 	case '"':
 		var buf bytes.Buffer
@@ -243,8 +238,7 @@ func readString(b []byte) (res string, read int, err error) {
 		return "", 0, fmt.Errorf("bad escaped string literal: %%s", string(b))
 	default:
 		for i := 0; i < len(b); i++ {
-			switch b[i] {
-			case ')', '}', ',':
+			if b[i] == delim || b[i] == ',' {
 				return string(b[:i]), i, nil
 			}
 		}
@@ -259,14 +253,14 @@ const quotedComma = ` + "`\",\"`" + `
 `)
 }
 
-func (g *generator) renderSliceParser(t reflect.Type, target string) {
+func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 	if t.Kind() == reflect.Struct && !slices.Contains(g.seenAlreadyTypes, t) {
 		g.needMoreTypes = append(g.needMoreTypes, t)
 		g.seenAlreadyTypes = append(g.seenAlreadyTypes, t)
 	}
 	g.fprintf(`
 	{
-		var str, n, e = readString(sourceBytes[cur:])
+		var str, n, e = readString(sourceBytes[cur:], '%s')
 		if e != nil {
 			return e
 		}
@@ -277,7 +271,7 @@ func (g *generator) renderSliceParser(t reflect.Type, target string) {
 			for cur := 0; cur < len(str)-1; {
 				var n int
 				var a string
-				if a, n, err = readString(unsafeBytes(str[cur:])); err != nil {
+				if a, n, err = readString(unsafeBytes(str[cur:]), '}'); err != nil {
 					return err
 				}
 				cur += n + 1
@@ -289,26 +283,26 @@ func (g *generator) renderSliceParser(t reflect.Type, target string) {
 			%s = items
 		}
 	}
-`, t.Name(), t.Name(), target)
+`, delim, t.Name(), t.Name(), target)
 	g.addImport("bytes", "strings")
 }
 
-func (g *generator) renderStructField(t reflect.Type, delim string, format string, a ...any) {
+func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 	var target = fmt.Sprintf(format, a...)
 	switch t.Kind() {
 	case reflect.Slice:
 		var elemType = t.Elem()
-		g.renderSliceParser(elemType, target)
+		g.renderSliceParser(elemType, target, ")")
 	case reflect.String:
-		g.renderStringParser(target)
+		g.renderStringParser(target, ")")
 	case reflect.Float32:
-		g.renderFloatParser(target, FLOAT_32)
+		g.renderFloatParser(target, ")", FLOAT_32)
 	case reflect.Float64:
-		g.renderFloatParser(target, FLOAT_64)
+		g.renderFloatParser(target, ")", FLOAT_64)
 	case reflect.Int:
-		g.renderIntegerParser(target, t)
+		g.renderIntegerParser(target, ")", t)
 	case reflect.Bool:
-		g.renderBooleanParser(target)
+		g.renderBooleanParser(target, ")")
 	default:
 		g.fprintf("\tpanic(\"type %s is unparseable now\")\n", t.Name())
 	}
