@@ -69,6 +69,14 @@ func (g *generator) renderNullableStructFieldMarshaller(field *reflect.StructFie
 
 func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 	switch t.Kind() {
+	case reflect.Float64:
+		g.fprintf(`
+		var thing = strconv.FormatFloat(%s, 'f', -1, 64)
+`, name)
+	case reflect.Float32:
+		g.fprintf(`
+		var thing = strconv.FormatFloat(%s, 'f', -1, 32)
+`, name)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32,
 		reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16,
 		reflect.Uint32, reflect.Uint64, reflect.Uintptr:

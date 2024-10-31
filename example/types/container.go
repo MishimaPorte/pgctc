@@ -31,6 +31,7 @@ type (
 		ContainerImage       string  `json:"container_image"`
 		ContainerImageTag    string  `json:"container_image_tag"`
 		ConfigurationOptions Options `json:"configuraion_options"`
+		Kek                  float64 `json:"kek"`
 	}
 	Containers []Container
 )

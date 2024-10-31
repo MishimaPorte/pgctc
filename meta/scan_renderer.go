@@ -101,40 +101,83 @@ func (g *generator) renderStringParser(target string) {
 
 }
 
-func (g *generator) renderIntegerParser(delim, target string, t reflect.Type) {
+type FloatType byte
+
+const (
+	FLOAT_32 FloatType = iota
+	FLOAT_64
+)
+
+func (g *generator) renderFloatParser(target string, ftype FloatType) {
+	var bitsize int
+	switch ftype {
+	case FLOAT_32:
+		bitsize = 32
+	case FLOAT_64:
+		bitsize = 64
+	default:
+		panic("should never happen")
+	}
+
 	g.addImport("strconv")
 	g.fprintf(`
 	{
-		var startIntField = cur
-		for ; source[cur] != '%s'; cur++ {
+		var next, n, e = readString(sourceBytes[cur:])
+		if e != nil {
+			return e
 		}
-		var answer int64
-		if answer, err = strconv.ParseInt(unsafeString(sourceBytes[startIntField:cur]), 10, 64); err != nil {
-			return err
+		var vfloat float64
+		if vfloat, e = strconv.ParseFloat(next, %d); e != nil {
+			return e
 		}
-		%s = %s(answer)
+		cur += n
+		%s = float%d(vfloat)
 	}
-`, delim, target, t)
+	
+`, bitsize, target, bitsize)
 
 }
 
-func (g *generator) renderBooleanParser(delim, target string) {
+func (g *generator) renderIntegerParser(target string, t reflect.Type) {
+	g.addImport("strconv")
 	g.fprintf(`
 	{
-		var start = cur
-		for ; sourceBytes[cur] != '%s'; cur++ {
+		var next, n, e = readString(sourceBytes[cur:])
+		if e != nil {
+			return e
 		}
-		var boolString = unsafeString(sourceBytes[start:cur])
-		switch boolString {
+		var answer int64
+		if answer, err = strconv.ParseInt(next, 10, 64); err != nil {
+			return err
+		}
+		cur += n
+		%s = %s(answer)
+	}
+`, target, t)
+
+}
+
+// Postgres kinda states, that it will never output anything except for
+// "t" or "f" (although supporting a range of strings as boolean identifiers)
+// This is a partial, therefore, but sufficient implementation for postgres.
+func (g *generator) renderBooleanParser(target string) {
+	g.fprintf(`
+	{
+		var next, n, e = readString(sourceBytes[cur:])
+		if e != nil {
+			return e
+		}
+		cur += n
+		switch next {
 		case "t":
 			%s = true
 		case "f":
 			%s = false
 		default:
-			panic("bad bool string from postgres: " + boolString)
+			panic("bad bool string from postgres: " + next)
 		}
 	}
-`, delim, target, target)
+`, target, target)
 }
 
 func (g *generator) renderFileHeader(packageName string) {
@@ -256,10 +299,14 @@ func (g *generator) renderStructField(t reflect.Type, delim string, format strin
 		g.renderSliceParser(elemType, target)
 	case reflect.String:
 		g.renderStringParser(target)
+	case reflect.Float32:
+		g.renderFloatParser(target, FLOAT_32)
+	case reflect.Float64:
+		g.renderFloatParser(target, FLOAT_64)
 	case reflect.Int:
-		g.renderIntegerParser(delim, target, t)
+		g.renderIntegerParser(target, t)
 	case reflect.Bool:
-		g.renderBooleanParser(delim, target)
+		g.renderBooleanParser(target)
 	default:
 		g.fprintf("\tpanic(\"type %s is unparseable now\")\n", t.Name())
 	}
