@@ -258,6 +258,22 @@ const quotedComma = ` + "`\",\"`" + `
 }
 
 func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
+	if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+		g.fprintf(`
+	{
+		var str, n, e = readString(sourceBytes[cur:], '%s')
+		if e != nil {
+			return e
+		}
+		cur += n
+		if err = %s.Scan(str); err != nil {
+			return err
+		}
+	}
+`, delim, target)
+		return
+	}
+
 	if t.Kind() == reflect.Struct && !slices.Contains(g.seenAlreadyTypes, t) {
 		g.needMoreTypes = append(g.needMoreTypes, t)
 		g.seenAlreadyTypes = append(g.seenAlreadyTypes, t)
