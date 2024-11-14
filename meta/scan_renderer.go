@@ -258,21 +258,6 @@ const quotedComma = ` + "`\",\"`" + `
 }
 
 func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
-	if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
-		g.fprintf(`
-	{
-		var str, n, e = readString(sourceBytes[cur:], '%s')
-		if e != nil {
-			return e
-		}
-		cur += n
-		if err = %s.Scan(str); err != nil {
-			return err
-		}
-	}
-`, delim, target)
-		return
-	}
 
 	if t.Kind() == reflect.Struct && !slices.Contains(g.seenAlreadyTypes, t) {
 		g.needMoreTypes = append(g.needMoreTypes, t)
@@ -311,8 +296,22 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 	var target = fmt.Sprintf(format, a...)
 	switch t.Kind() {
 	case reflect.Slice:
-		var elemType = t.Elem()
-		g.renderSliceParser(elemType, target, ")")
+		if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+			g.fprintf(`
+	{
+		var str, n, e = readString(sourceBytes[cur:], ')')
+		if e != nil {
+			return e
+		}
+		cur += n
+		if err = %s.Scan(str); err != nil {
+			return err
+		}
+	}
+`, target)
+		} else {
+			g.renderSliceParser(t.Elem(), target, ")")
+		}
 	case reflect.String:
 		g.renderStringParser(target, ")")
 	case reflect.Float32:
