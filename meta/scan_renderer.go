@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"database/sql"
 	"fmt"
 	"reflect"
 	"slices"
@@ -25,6 +26,9 @@ func (g *generator) renderPrologue() {
 }
 
 func (g *generator) renderDriverScan(t reflect.Type) {
+	if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+		return
+	}
 	g.fprintf("func (v *%s) Scan(thing any) (err error) {", t.Name())
 	g.addImport("strconv")
 	switch t.Kind() {

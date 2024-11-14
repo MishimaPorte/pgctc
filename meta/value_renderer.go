@@ -1,11 +1,15 @@
 package meta
 
 import (
+	"database/sql/driver"
 	"fmt"
 	"reflect"
 )
 
 func (g *generator) renderDriverValue(t reflect.Type) {
+	if reflect.PointerTo(t).Implements(reflect.TypeOf((*driver.Valuer)(nil)).Elem()) {
+		return
+	}
 	switch t.Kind() {
 	case reflect.Struct:
 		g.fprintf(`
