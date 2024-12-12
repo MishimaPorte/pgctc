@@ -81,6 +81,7 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 			thing = string(b)
 		}
 `, name)
+		return
 	}
 	switch t.Kind() {
 	case reflect.Float64:

@@ -307,6 +307,8 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		}
 	}
 `, target)
+		g.fprintf("\tcur++\n")
+		return
 	}
 	switch t.Kind() {
 	case reflect.Slice:
