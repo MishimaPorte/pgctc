@@ -76,7 +76,7 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 		g.fprintf(`
 		var thing string
 		if a, b := %s.Value(); b != nil {
-			return b
+			return nil, b
 		} else {
 			switch v := a.(type) {
 				case int64:
