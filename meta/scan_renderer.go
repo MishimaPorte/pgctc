@@ -294,6 +294,20 @@ func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 
 func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 	var target = fmt.Sprintf(format, a...)
+	if t.Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) || reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+		g.fprintf(`
+	{
+		var str, n, e = readString(sourceBytes[cur:], ')')
+		if e != nil {
+			return e
+		}
+		cur += n
+		if err = %s.Scan(str); err != nil {
+			return err
+		}
+	}
+`, target)
+	}
 	switch t.Kind() {
 	case reflect.Slice:
 		if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {

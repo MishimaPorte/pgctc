@@ -72,6 +72,16 @@ func (g *generator) renderNullableStructFieldMarshaller(field *reflect.StructFie
 }
 
 func (g *generator) renderSimpleToString(t reflect.Type, name string) {
+	if t.Implements(reflect.TypeOf((*driver.Valuer)(nil)).Elem()) || reflect.PointerTo(t).Implements(reflect.TypeOf((*driver.Valuer)(nil)).Elem()) {
+		g.fprintf(`
+		var thing string
+		if a, b := %s.Value(); b != nil {
+			return b
+		} else {
+			thing = string(b)
+		}
+`, name)
+	}
 	switch t.Kind() {
 	case reflect.Float64:
 		g.fprintf(`
