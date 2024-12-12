@@ -78,7 +78,26 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 		if a, b := %s.Value(); b != nil {
 			return b
 		} else {
-			thing = string(b)
+			switch v := a.(type) {
+				case int64:
+					thing = fmt.Sprint(v)
+				case float64:
+					thing = strconv.FormatFloat(v, 'f', -1, 64)
+				case bool:
+					if v {
+						thing = "t"
+					} else {
+						thing = "f"
+					}
+				case []byte:
+					thing = string(v)
+				case string:
+					thing = v
+				case time.Time:
+					thing = v.String()
+				default:
+					panic("all is bad")
+			}
 		}
 `, name)
 		return
