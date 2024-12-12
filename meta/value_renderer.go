@@ -91,11 +91,11 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 						thing = "f"
 					}
 				case []byte:
-					thing = string(v)
+					thing = strconv.Quote(string(v))
 				case string:
-					thing = v
+					thing = strconv.Quote(v)
 				case time.Time:
-					thing = v.String()
+					thing = strconv.Quote(v.String())
 				default:
 					panic("all is bad")
 			}
