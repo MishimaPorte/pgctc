@@ -334,7 +334,10 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		g.renderFloatParser(target, ")", FLOAT_32)
 	case reflect.Float64:
 		g.renderFloatParser(target, ")", FLOAT_64)
-	case reflect.Int:
+	case reflect.Int,
+		reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Uint, reflect.Uintptr:
 		g.renderIntegerParser(target, ")", t)
 	case reflect.Bool:
 		g.renderBooleanParser(target, ")")
