@@ -183,10 +183,6 @@ func (g *generator) renderStructFieldMarshaller(field *reflect.StructField) {
 	if !field.IsExported() {
 		return
 	}
-	if nullable := isNullable(field.Type); nullable != nil {
-		g.renderNullableStructFieldMarshaller(field, nullable)
-		return
-	}
 
 	g.fprintf("\t{\n")
 	g.renderSimpleToString(field.Type, fmt.Sprintf("v.%s", field.Name))

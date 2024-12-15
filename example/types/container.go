@@ -1,7 +1,5 @@
 package types
 
-import "github.com/lib/pq"
-
 /*
 Type declarations here are grouped so various flavours
 of one type could share docstrings.
@@ -25,14 +23,13 @@ type (
 // module operation.
 type (
 	Container struct {
-		DefaultCpuLimit      string `json:"default_cpu_limit"`
-		DefaultCpuRequest    string `json:"default_cpu_request"`
-		DefaultMemoryLimit   string `json:"default_memory_limit"`
-		DefaultMemoryRequest string `json:"default_memory_request"`
-		ContainerName        string `json:"container_name"`
-		ContainerImage       string `json:"container_image"`
-		ContainerImageTag    string `json:"container_image_tag"`
-		Keks                 pq.StringArray
+		DefaultCpuLimit      string    `json:"default_cpu_limit"`
+		DefaultCpuRequest    string    `json:"default_cpu_request"`
+		DefaultMemoryLimit   string    `json:"default_memory_limit"`
+		DefaultMemoryRequest string    `json:"default_memory_request"`
+		ContainerName        string    `json:"container_name"`
+		ContainerImage       string    `json:"container_image"`
+		ContainerImageTag    string    `json:"container_image_tag"`
 		ConfigurationOptions []Options `json:"configuraion_options"`
 		Kek                  float64   `json:"kek"`
 	}
