@@ -341,8 +341,28 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		g.renderIntegerParser(target, ")", t)
 	case reflect.Bool:
 		g.renderBooleanParser(target, ")")
+	case reflect.Struct:
+		g.insertTypeForFurtherProcessing(t)
+		g.renderStructParser(target, ")")
 	default:
 		g.fprintf("\tpanic(\"type %s is unparseable now\")\n", t.Name())
 	}
 	g.fprintf("\tcur++\n")
+}
+
+func (g *generator) renderStructParser(target string, delim string) {
+	g.fprintf(`
+	{
+		var next, n, e = readString(sourceBytes[cur:], '%s')
+		if e != nil {
+			return e
+		}
+		cur += n
+		e = %s.Scan(next)
+		if e != nil {
+			return e
+		}
+	}
+`, delim, target)
+
 }
