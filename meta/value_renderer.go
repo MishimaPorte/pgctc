@@ -74,6 +74,7 @@ func (g *generator) renderNullableStructFieldMarshaller(field *reflect.StructFie
 func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 	if t.Implements(reflect.TypeOf((*driver.Valuer)(nil)).Elem()) || reflect.PointerTo(t).Implements(reflect.TypeOf((*driver.Valuer)(nil)).Elem()) {
 		g.addImport("time")
+		g.addImport("hex")
 		g.fprintf(`
 		var thing string
 		if a, b := %s.Value(); b != nil {
@@ -91,7 +92,7 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 						thing = "f"
 					}
 				case []byte:
-					thing = strconv.Quote(string(v))
+					thing = strconv.Quote("\\x" + hex.EncodeToString(v))
 				case string:
 					thing = strconv.Quote(v)
 				case time.Time:
