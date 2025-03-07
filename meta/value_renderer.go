@@ -97,6 +97,8 @@ func (g *generator) renderSimpleToString(t reflect.Type, name string) {
 					thing = strconv.Quote(v)
 				case time.Time:
 					thing = strconv.Quote(v.String())
+				case nil:
+					thing = ""
 				default:
 					panic("all is bad")
 			}
