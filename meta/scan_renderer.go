@@ -266,6 +266,9 @@ func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 	g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], '%s')
+		if n == 0 {
+			goto Out
+		}
 		if e != nil {
 			return e
 		}
@@ -287,6 +290,7 @@ func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 			}
 			%s = items
 		}
+		Out:
 	}
 `, delim, t.Name(), t.Name(), target)
 	g.addImport("bytes", "strings")
@@ -298,6 +302,9 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], ')')
+		if n == 0 {
+			goto Out
+		}
 		if e != nil {
 			return e
 		}
@@ -305,6 +312,7 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		if err = %s.Scan(str); err != nil {
 			return err
 		}
+		Out:
 	}
 `, target)
 		g.fprintf("\tcur++\n")
@@ -316,6 +324,9 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 			g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], ')')
+		if n == 0 {
+			goto Out
+		}
 		if e != nil {
 			return e
 		}
@@ -323,6 +334,7 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		if err = %s.Scan(str); err != nil {
 			return err
 		}
+		Out:
 	}
 `, target)
 		} else {
