@@ -263,11 +263,12 @@ func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 		g.needMoreTypes = append(g.needMoreTypes, t)
 		g.seenAlreadyTypes = append(g.seenAlreadyTypes, t)
 	}
+	var label = g.getLabel()
 	g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], '%s')
 		if n == 0 {
-			goto Out
+			goto %s
 		}
 		if e != nil {
 			return e
@@ -290,20 +291,21 @@ func (g *generator) renderSliceParser(t reflect.Type, target, delim string) {
 			}
 			%s = items
 		}
-		Out:
+		%s:
 	}
-`, delim, t.Name(), t.Name(), target)
+`, delim, label, t.Name(), t.Name(), target, label)
 	g.addImport("bytes", "strings")
 }
 
 func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 	var target = fmt.Sprintf(format, a...)
 	if t.Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) || reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+		var label = g.getLabel()
 		g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], ')')
 		if n == 0 {
-			goto Out
+			goto %s
 		}
 		if e != nil {
 			return e
@@ -312,20 +314,21 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		if err = %s.Scan(str); err != nil {
 			return err
 		}
-		Out:
+		%s:
 	}
-`, target)
+`, label, target, label)
 		g.fprintf("\tcur++\n")
 		return
 	}
 	switch t.Kind() {
 	case reflect.Slice:
 		if reflect.PointerTo(t).Implements(reflect.TypeOf((*sql.Scanner)(nil)).Elem()) {
+			var label = g.getLabel()
 			g.fprintf(`
 	{
 		var str, n, e = readString(sourceBytes[cur:], ')')
 		if n == 0 {
-			goto Out
+			goto %s
 		}
 		if e != nil {
 			return e
@@ -334,9 +337,9 @@ func (g *generator) renderStructField(t reflect.Type, format string, a ...any) {
 		if err = %s.Scan(str); err != nil {
 			return err
 		}
-		Out:
+		%s:
 	}
-`, target)
+`, label, target, label)
 		} else {
 			g.renderSliceParser(t.Elem(), target, ")")
 		}

@@ -9,10 +9,16 @@ import (
 )
 
 type generator struct {
+	label            int
 	out              io.Writer
 	importsNeeded    []string
 	needMoreTypes    []reflect.Type
 	seenAlreadyTypes []reflect.Type
+}
+
+func (g *generator) getLabel() string {
+	g.label++
+	return fmt.Sprintf("label%d", g.label)
 }
 
 func (g *generator) fprintf(format string, a ...any) (n int, err error) {
