@@ -51,6 +51,10 @@ func (v *%s) Scan(thing any) (err error) {
 		v.Valid = false
 		return
 	case string:
+		if len(thval) == 0 {
+			v.Valid = false
+			return
+		}
 		v.Valid = true
 		v.Item = new(%s)
 		return v.Item.Scan(thval)
