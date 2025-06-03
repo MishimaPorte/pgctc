@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"go/types"
 	"iter"
+	"log/slog"
 	"maps"
 	"os"
 	"os/exec"
@@ -199,8 +200,15 @@ type needs struct {
 	scanner bool
 	valuer  bool
 }
+
+type neededAnonStruct struct {
+	string
+	*types.Struct
+}
+
 type typeNeedsMap map[*types.Package]map[string]needs
 type generatorState struct {
+	logger slog.Logger
 	pggen.AstAcc
 
 	nowPkg *types.Package
@@ -213,8 +221,10 @@ type generatorState struct {
 	generatedPackages map[*types.Package]struct{}
 	// named types that we encounter and that we need to generate
 	// scanner and valuer implementations for.
-	typeNeeds typeNeedsMap
-	seenTypes typeNeedsMap
+	typeNeeds          typeNeedsMap
+	anonTypeNeedsScan  []neededAnonStruct
+	anonTypeNeedsValue []neededAnonStruct
+	seenTypes          typeNeedsMap
 
 	curPlusNOne *ast.AssignStmt
 	curPlusN    *ast.AssignStmt
@@ -233,7 +243,7 @@ func (g *generatorState) unsafeStringRender(e ast.Expr) *ast.CallExpr {
 	)
 }
 
-func (g *generatorState) GenerateScanForStruct(name string, spec *types.Struct, prologue []ast.Stmt) ([]ast.Stmt, error) {
+func (g *generatorState) GenerateScanForStruct(name string, where ast.Expr, spec *types.Struct, prologue []ast.Stmt) ([]ast.Stmt, error) {
 	var checkSrc = g.If(g.Or(
 		g.Neq(g.IndexInt(g.I("sourceBytes"), 0), g.AsLitChar("(")),
 		g.Neq(g.Index(g.I("sourceBytes"), g.SubConst(g.Len(g.I("source")), 1)), g.AsLitChar(")")),
@@ -245,8 +255,8 @@ func (g *generatorState) GenerateScanForStruct(name string, spec *types.Struct, 
 		var fname = field.Name()
 		var ftype = field.Type()
 		prologue = append(prologue, g.renderScanner(
-			ftype,
-			g.Selector(g.I("v"), fname),
+			ftype, name+"_"+fname,
+			g.Selector(where, fname),
 			g.SliceExpr1(g.I("sourceBytes"), g.I("cur"))))
 	}
 
@@ -263,15 +273,7 @@ var (
 				types.NewTuple(
 					types.NewVar(token.NoPos, nil, "err", types.Universe.Lookup("error").Type())), false),
 		)}, nil).Complete()
-	valuerIface = types.NewInterfaceType(
-		[]*types.Func{types.NewFunc(
-			token.NoPos, nil, "Value", types.NewSignatureType(nil, nil, nil, nil,
-				types.NewTuple(
-					types.NewVar(token.NoPos, nil, "", types.NewTypeName(
-						token.NoPos, types.NewPackage("database/sql/driver", "driver"), "Value", types.Universe.Lookup("any").Type(),
-					).Type()),
-					types.NewVar(token.NoPos, nil, "", types.Universe.Lookup("error").Type())), false),
-		)}, nil).Complete()
+	valuerIface *types.Interface
 )
 
 func impl(t types.Type, i *types.Interface) bool {
@@ -323,31 +325,29 @@ func (g *generatorState) renderValuableValuerForField(what, where ast.Expr) ast.
 		g.Assign(where)(g.FuncCall(driverValueToStringName)(g.I("value"))),
 	)
 }
-func (g *generatorState) renderValuer(typ types.Type, what, where ast.Expr) ast.Stmt {
+func (g *generatorState) renderValuer(typ types.Type, parent string, what, where ast.Expr) ast.Stmt {
 	switch v := typ.(type) {
 	case *types.Pointer:
 		return g.IfElse(g.Eq(what, g.Nil))(
 			g.Assign(where)(g.AsLit("")),
 		)(
-			g.renderValuer(v.Elem(), g.Star(what), where),
+			g.renderValuer(v.Elem(), parent, g.Star(what), where),
 		)
 	case *types.Slice:
-		return g.renderValuerRangeable(v.Elem(), what, where)
+		return g.renderValuerRangeable(v.Elem(), parent, what, where)
 	case *types.Array:
-		return g.renderValuerRangeable(v.Elem(), what, where)
+		return g.renderValuerRangeable(v.Elem(), parent, what, where)
 	case *types.Named:
 		if _, ok := g.generatedPackages[v.Obj().Pkg()]; ok {
 			// For packages that we do actually care about we may generate
 			// a scanner implementation ourselves; we queue for generation (if needed)
 			// and then just generate the call
 			if impl(v, valuerIface) {
-				for i := range v.Methods() {
-					if i.Name() == "Value" {
-						var file = g.fset.File(i.Pos())
-						if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
-							return g.renderValuableValuerForField(what, where)
-						}
-						break
+				var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "Value")
+				if method != nil {
+					var file = g.fset.File(method.Pos())
+					if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
+						return g.renderValuableValuerForField(what, where)
 					}
 				}
 			}
@@ -362,11 +362,12 @@ func (g *generatorState) renderValuer(typ types.Type, what, where ast.Expr) ast.
 	case *types.Basic:
 		return g.renderValuerBasic(v, what, where)
 	case *types.Alias:
-		return g.renderValuer(v.Underlying(), what, where)
+		return g.renderValuer(v.Underlying(), parent, what, where)
 	case *types.Map:
 		panic("TODO: implement maps as an array of two-field structs: key and value")
 	case *types.Struct:
-		panic("TODO: implement anonymous structs (using the same heuristics)")
+		g.queueAnonStructForValuer(v, parent)
+		return g.renderWithValuerFuncForAnons(parent, what, where)
 	case *types.Interface:
 		// TODO: support generic types where the thing implements the
 		//       needed interface
@@ -390,10 +391,10 @@ func (g *generatorState) renderValuer(typ types.Type, what, where ast.Expr) ast.
 	default:
 		panic(fmt.Sprintf("unexpected type kind(%T): %#v", v, v))
 	}
-	return g.Block()
+	panic("unreachable")
 }
 
-func (g *generatorState) renderValuerRangeable(elem types.Type, what ast.Expr, where ast.Expr) ast.Stmt {
+func (g *generatorState) renderValuerRangeable(elem types.Type, typename string, what ast.Expr, where ast.Expr) ast.Stmt {
 	var stmts = make([]ast.Stmt, 0)
 	stmts = append(stmts, g.VarDeclType("value2", g.String))
 	stmts = append(stmts, g.VarDeclType("value2Sb", g.ImportAndUse("strings", "Builder")))
@@ -405,7 +406,7 @@ func (g *generatorState) renderValuerRangeable(elem types.Type, what ast.Expr, w
 	stmts = append(stmts, g.Stmt(g.MethodCall(g.I("value2Sb"), "WriteByte")(g.AsLitChar("{"))))
 	var val = g.I("val")
 	stmts = append(stmts, g.Range2Def(g.I("i"), val, what)(
-		g.renderValuer(elem, val, value2),
+		g.renderValuer(elem, typename, val, value2),
 		wvalue,
 		wcommaIf,
 	))
@@ -416,7 +417,8 @@ func (g *generatorState) renderValuerRangeable(elem types.Type, what ast.Expr, w
 	return g.Block(
 		stmts...)
 }
-func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast.Stmt {
+func (g *generatorState) renderScanner(typ types.Type, namelet string, place, from ast.Expr) ast.Stmt {
+	g.logger.Info("rendering scanner", "typename", typ.String())
 	switch v := typ.(type) {
 	case *types.Pointer:
 		// should somehow deblock this as there is no need for scoping
@@ -428,10 +430,10 @@ func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast
 		//       I dont know.
 		return g.Block(
 			g.Assign(place)(g.New(g.ValueTypeExpr(v.Elem()))),
-			g.renderScanner(v.Elem(), g.Star(place), from),
+			g.renderScanner(v.Elem(), namelet, g.Star(place), from),
 		)
 	case *types.Slice:
-		return g.renderSliceScannerFor(place, from, v.Elem())
+		return g.renderSliceScannerFor(place, from, namelet, v.Elem())
 	// TODO: use the same logic like we employ in the slice parser
 	//       to parse the array thing
 	case *types.Array:
@@ -440,7 +442,7 @@ func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast
 		var sliceLen = g.Len(sliceAsArray)
 		return g.Block(
 			g.VarDecl2(g.ValueSpec("sliceAsArray")(g.SliceType(g.ValueTypeExpr(v.Elem())))),
-			g.renderSliceScannerFor(sliceAsArray, from, v.Elem()),
+			g.renderSliceScannerFor(sliceAsArray, from, namelet, v.Elem()),
 			g.If(g.Neq(sliceLen, arrLen))(
 				g.Return(
 					g.Errorf(fmt.Sprintf(
@@ -451,20 +453,17 @@ func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast
 				g.Slice2(place, 0, int(v.Len())), sliceAsArray,
 			)),
 		)
-		// panic("TODO: array parsing")
 	case *types.Named:
 		if _, ok := g.generatedPackages[v.Obj().Pkg()]; ok {
 			// For packages that we do actually care about we may generate
 			// a scanner implementation ourselves; we queue for generation (if needed)
 			// and then just generate the call
 			if impl(v, scannerIface) {
-				for i := range v.Methods() {
-					if i.Name() == "Scan" {
-						var file = g.fset.File(i.Pos())
-						if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
-							return g.renderScannableScannerForField(place, from)
-						}
-						break
+				var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "Scan")
+				if method != nil {
+					var file = g.fset.File(method.Pos())
+					if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
+						return g.renderScannableScannerForField(place, from)
 					}
 				}
 			}
@@ -479,11 +478,13 @@ func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast
 	case *types.Basic:
 		return g.renderBasicScan(v, place, from)
 	case *types.Alias:
-		return g.renderScanner(v.Underlying(), place, from)
+		return g.renderScanner(v.Underlying(), namelet, place, from)
 	case *types.Map:
 		panic("TODO: implement maps as an array of two-field structs: key and value")
 	case *types.Struct:
-		panic("TODO: implement anonymous structs (using the same heuristics)")
+		g.logger.Info("doing anon struct", "parentName", namelet)
+		g.queueAnonStructForScanner(v, namelet)
+		return g.renderWithScannerFuncForAnons("__Scan_"+namelet, place, from)
 	case *types.Interface:
 		// TODO: support generic types where the thing implements the
 		//       needed interface
@@ -528,6 +529,37 @@ func (g *generatorState) renderBasicScan(v *types.Basic, place ast.Expr, from as
 	}
 }
 
+func (g *generatorState) renderWithValuerFuncForAnons(funcname string, place, from ast.Expr) *ast.BlockStmt {
+	return g.Block(
+		g.VarDeclInit(funcname+"_value", "err")(g.FuncCall("__Value_"+funcname)(g.Reference(place))),
+		g.If(g.Neq(g.Err, g.Nil))(g.Return(g.Nil, g.Err)),
+		g.Assign(from)(g.FuncCall(driverValueToStringName)(g.I(funcname+"_value"))),
+	)
+}
+func (g *generatorState) renderWithScannerFuncForAnons(funcname string, place, from ast.Expr) *ast.IfStmt {
+	return g.IfElse2(
+		g.AssignStmt("next", "n", "e")(
+			g.FuncCall("__intrinsic_readString")(
+				from,
+				g.AsLitChar(")"))),
+		g.Eq(g.I("n"), g.AsLitInt(0)),
+	)()(
+		g.IfElse(
+			g.Neq(g.I("e"), g.Nil),
+		)(
+			g.Return(g.I("e")),
+		)(
+			g.Assign(g.I("cur"))(
+				g.Add(g.I("cur"), g.I("n"))),
+			g.If2(
+				g.AssignStmt("e")(
+					g.FuncCall(funcname)(
+						g.Reference(place), g.I("next"))),
+				g.Neq(g.I("e"), g.Nil),
+			)(g.Return(g.I("e"))),
+		),
+	)
+}
 func (g *generatorState) renderScannableScannerForField(place, from ast.Expr) *ast.IfStmt {
 	return g.IfElse2(
 		g.AssignStmt("next", "n", "e")(
@@ -627,7 +659,7 @@ func (g *generatorState) renderBooleanScannerForField(place, from ast.Expr) *ast
 }
 
 // TODO: currently compiled packages should not import themselves.
-func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, elem types.Type) *ast.BlockStmt {
+func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, parentName string, elem types.Type) *ast.BlockStmt {
 	return g.Block(
 		g.Assign(
 			place)(
@@ -655,7 +687,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, elem types.
 			)(
 				g.Append(place, g.ZeroValue(elem)),
 				g.renderScanner(
-					elem,
+					elem, parentName,
 					g.Index(place, g.SubConst(g.Len(place), 1)),
 					g.SliceExpr1(g.unsafeBytesRender(g.I("next")), g.I("cur"))),
 				g.Assign(
@@ -781,6 +813,44 @@ func (g *generatorState) typeNeedsIterator() iter.Seq2[*types.Package, map[strin
 		}
 	}
 }
+func (g *generatorState) anonNeedsValueIterator() iter.Seq[neededAnonStruct] {
+	var a = g.anonTypeNeedsValue
+	g.anonTypeNeedsValue = make([]neededAnonStruct, 0)
+	return func(yield func(neededAnonStruct) bool) {
+		for {
+			for _, sub := range a {
+				if !yield(sub) {
+					return
+				}
+			}
+			a = a[:0]
+			if len(g.anonTypeNeedsValue) == 0 {
+				return
+			}
+			a = g.anonTypeNeedsValue
+			g.anonTypeNeedsValue = g.anonTypeNeedsValue[:0]
+		}
+	}
+}
+func (g *generatorState) anonNeedsScanIterator() iter.Seq[neededAnonStruct] {
+	var a = g.anonTypeNeedsScan
+	g.anonTypeNeedsScan = make([]neededAnonStruct, 0)
+	return func(yield func(neededAnonStruct) bool) {
+		for {
+			for _, sub := range a {
+				if !yield(sub) {
+					return
+				}
+			}
+			a = a[:0]
+			if len(g.anonTypeNeedsScan) == 0 {
+				return
+			}
+			a = g.anonTypeNeedsScan
+			g.anonTypeNeedsScan = g.anonTypeNeedsScan[:0]
+		}
+	}
+}
 func (tm typeNeedsMap) getFromSeenMap(pkg *types.Package, obj types.Object) needs {
 	var m = tm[pkg]
 	if m == nil {
@@ -796,6 +866,16 @@ func (tm typeNeedsMap) insertToSeenMap(pkg *types.Package, obj types.Object, n n
 		tm[pkg] = m
 	}
 	m[obj.Name()] = n
+}
+func (g *generatorState) queueAnonStructForValuer(obj *types.Struct, typenamelet string) {
+	g.anonTypeNeedsValue = append(g.anonTypeNeedsValue, neededAnonStruct{
+		typenamelet, obj,
+	})
+}
+func (g *generatorState) queueAnonStructForScanner(obj *types.Struct, typenamelet string) {
+	g.anonTypeNeedsScan = append(g.anonTypeNeedsScan, neededAnonStruct{
+		typenamelet, obj,
+	})
 }
 func (g *generatorState) queueObjForScanner(obj types.Object) {
 	var old = g.seenTypes.getFromSeenMap(obj.Pkg(), obj)
@@ -1024,37 +1104,21 @@ func (p *Package) importer() importerFunc {
 	})
 }
 
+func (g *generatorState) generateValuerForAnonStruct(t *types.Struct, namelet string, prologue []ast.Stmt) error {
+	var body = g.createValuerBodyStruct(prologue, namelet, g.I("place"), t)
+	g.CreateFunc("__Value_"+namelet)(
+		g.Param("place", g.Star(g.ValueTypeExpr(t))),
+	)(
+		g.Param("t", g.ImportAndUse2("database/sql/driver", "driver", "Value")),
+		g.Param("err", g.I("error")),
+	)(body...)
+	return nil
+}
 func (g *generatorState) generateValuerForType(t types.Type, name string, prologue []ast.Stmt) error {
+	g.logger.Info("generating valuer", "name", name)
 	switch v := t.(type) {
 	case *types.Struct:
-		var body = prologue
-
-		var nf = v.NumFields()
-		// TODO: move these to generatorState structure and cache to avoid excessive allocations
-		//       (even arena memory needs to be used with caution, frater meus)
-		var rec = g.I("v")
-		var wcomma = g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar(",")))
-		var val = g.I("value")
-		var wvalue = g.Stmt(g.MethodCall(g.I("b"), "WriteString")(val))
-		body = append(body, g.VarDeclType("value", g.String))
-		for i := range nf {
-			var field = v.Field(i)
-
-			body = append(body,
-				g.renderValuer(
-					field.Type(),
-					g.Selector(rec, field.Name()),
-					val))
-			body = append(body, wvalue)
-			if nf != i+1 {
-				body = append(body, wcomma)
-			}
-
-		}
-		body = append(body,
-			g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar(")"))),
-			g.Return(g.MethodCall(g.I("b"), "String")(), g.Nil))
-
+		var body = g.createValuerBodyStruct(prologue, name, g.I("v"), v)
 		g.CreateMethod("Value", "v", name, true)()(
 			g.Param("t", g.ImportAndUse2("database/sql/driver", "driver", "Value")),
 			g.Param("err", g.I("error")),
@@ -1062,6 +1126,54 @@ func (g *generatorState) generateValuerForType(t types.Type, name string, prolog
 	default:
 		panic(fmt.Sprintf("unexpected types.Type: %#v", v))
 	}
+	return nil
+}
+
+func (g *generatorState) createValuerBodyStruct(prologue []ast.Stmt, typename string, place ast.Expr, v *types.Struct) []ast.Stmt {
+	var body = prologue
+
+	var nf = v.NumFields()
+	// TODO: move these to generatorState structure and cache to avoid excessive allocations
+	//       (even arena memory needs to be used with caution, frater meus)
+	var wcomma = g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar(",")))
+	var val = g.I("value")
+	var wvalue = g.Stmt(g.MethodCall(g.I("b"), "WriteString")(val))
+	body = append(body, g.VarDeclType("value", g.String))
+	for i := range nf {
+		var field = v.Field(i)
+
+		body = append(body,
+			g.renderValuer(
+				field.Type(), typename+"_"+field.Name(),
+				g.Selector(place, field.Name()),
+				val))
+		body = append(body, wvalue)
+		if nf != i+1 {
+			body = append(body, wcomma)
+		}
+
+	}
+	body = append(body,
+		g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar(")"))),
+		g.Return(g.MethodCall(g.I("b"), "String")(), g.Nil))
+	return body
+}
+func (g *generatorState) generateScanForAnonStruct(
+	t *types.Struct,
+	// This is the kind of "name" we give anonymous types.
+	// Most of the time it is just OuterStructName_FieldName.
+	// TODO: Collision detection is needed probably
+	typeNamelet string,
+	prologue []ast.Stmt,
+) error {
+	var body, err = g.GenerateScanForStruct(typeNamelet, g.I("place"), t, prologue)
+	if err != nil {
+		return err
+	}
+	g.CreateFunc("__Scan_"+typeNamelet)(
+		g.Param("place", g.Star(g.ValueTypeExpr(t))),
+		g.Param("thing", g.Any),
+	)(g.Param("err", g.I("error")))(body...)
 	return nil
 }
 func (g *generatorState) generateScanForType(t types.Type, name string, prologue []ast.Stmt) error {
@@ -1081,7 +1193,7 @@ func (g *generatorState) generateScanForType(t types.Type, name string, prologue
 		prologue = append(
 			prologue, checkSrc, declCur,
 			g.renderScanner(
-				v,
+				v, name,
 				g.Star(g.I("v")),
 				g.SliceExpr1(g.I("sourceBytes"), g.I("cur"))),
 			g.Assign(g.Blank)(g.I("cur")),
@@ -1091,7 +1203,7 @@ func (g *generatorState) generateScanForType(t types.Type, name string, prologue
 			g.Param("thing", g.Any),
 		)(g.Param("err", g.I("error")))(prologue...)
 	case *types.Struct:
-		var body, err = g.GenerateScanForStruct(name, v, prologue)
+		var body, err = g.GenerateScanForStruct(name, g.I("v"), v, prologue)
 		if err != nil {
 			return err
 		}
@@ -1161,6 +1273,20 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 					return err
 				}
 			}
+		}
+	}
+	for needed := range g.anonNeedsScanIterator() {
+		if err = g.generateScanForAnonStruct(
+			needed.Struct, needed.string, scannerprologue,
+		); err != nil {
+			return err
+		}
+	}
+	for needed := range g.anonNeedsValueIterator() {
+		if err = g.generateValuerForAnonStruct(
+			needed.Struct, needed.string, valuerprologue,
+		); err != nil {
+			return err
 		}
 	}
 
@@ -1332,9 +1458,19 @@ func main() {
 	g.seen = make(map[string]*jsonPackage)
 	g.pkgs = make(map[string]*Package)
 	g.fset = token.NewFileSet()
+	g.logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
 	pggen.InitAstAcc(&g.AstAcc)
 	var pathname = os.Args[1]
 	var err error
+
+	var m map[string]*Package
+	if m, err = g.parsePackages(TypecheckingFlags{false}, "database/sql/driver"); err != nil {
+		panic(err.Error())
+	}
+	if err = g.addPackage(m["database/sql/driver"]); err != nil {
+		panic(err.Error())
+	}
+	valuerIface = m["database/sql/driver"].Types.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
 	if err = g.ParseModuleAndGenerate(TypecheckingFlags{false}, pathname); err != nil {
 		panic(err.Error())
 	}

@@ -382,6 +382,12 @@ func (a *AstAcc) Add(xs ...ast.Expr) *ast.BinaryExpr {
 	}
 	panic("unreachable")
 }
+func (a *AstAcc) Reference(x ast.Expr) *ast.UnaryExpr {
+	var ret = Alloc[ast.UnaryExpr](&a.a)
+	ret.X = x
+	ret.Op = token.AND // a.k.a. the амперсанд, "&"
+	return ret
+}
 func (a *AstAcc) Star(x ast.Expr) *ast.StarExpr {
 	var ret = Alloc[ast.StarExpr](&a.a)
 	ret.X = x
@@ -711,6 +717,39 @@ func (a *AstAcc) Import(pname string) {
 	}
 }
 
+func (a *AstAcc) CreateFunc(
+	name string,
+) func(
+	...*ast.Field,
+) func(
+	...*ast.Field,
+) func(
+	...ast.Stmt,
+) *ast.FuncDecl {
+	var decl = Alloc[ast.FuncDecl](&a.a)
+	decl.Name = a.I(name)
+	decl.Type = Alloc[ast.FuncType](&a.a)
+	return func(params ...*ast.Field) func(...*ast.Field) func(...ast.Stmt) *ast.FuncDecl {
+		if len(params) != 0 {
+			decl.Type.Params = Alloc[ast.FieldList](&a.a)
+			decl.Type.Params.List = Clone(&a.a, params).Slice()
+		}
+		return func(returns ...*ast.Field) func(...ast.Stmt) *ast.FuncDecl {
+			if len(returns) != 0 {
+				decl.Type.Results = Alloc[ast.FieldList](&a.a)
+				decl.Type.Results.List = Clone(&a.a, returns).Slice()
+			}
+			return func(stmts ...ast.Stmt) *ast.FuncDecl {
+				if len(stmts) != 0 {
+					decl.Body = Alloc[ast.BlockStmt](&a.a)
+					decl.Body.List = Clone(&a.a, stmts).Slice()
+				}
+				a.funcs = append(a.funcs, decl)
+				return decl
+			}
+		}
+	}
+}
 func (a *AstAcc) CreateMethod(
 	mName string,
 	rName string, rType string, rIsPtr bool,

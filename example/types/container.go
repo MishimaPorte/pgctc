@@ -1,5 +1,7 @@
 package types
 
+import "database/sql/driver"
+
 /*
 Type declarations here are grouped so various flavours
 of one type could share docstrings.
@@ -25,8 +27,25 @@ type (
 		Auf      A
 		Array    [10]bool
 		Slice    []bool
+		BadThing struct {
+			Kek string
+			Lol []struct {
+				Kek string
+				Lol bool
+			}
+		}
+		Hash ShaDigest
 	}
 )
+
+func (s ShaDigest) Scan(thing any) (err error) {
+	return nil
+}
+func (s ShaDigest) Value() (v driver.Value, err error) {
+	return nil, nil
+}
+
+type ShaDigest [32]byte
 
 type A struct {
 	Kek string

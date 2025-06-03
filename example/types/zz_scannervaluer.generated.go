@@ -278,6 +278,24 @@ func (v *Option) Scan(thing any) (err error) {
 			}
 		}
 	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := __Scan_Option_BadThing(&v.BadThing, next); e != nil {
+			return e
+		}
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.Hash.Scan(next); e != nil {
+			return e
+		}
+	}
 	_ = cur
 	return nil
 }
@@ -436,6 +454,57 @@ func (v *Option) Value() (t driver.Value, err error) {
 		value = value2Sb.String()
 	}
 	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var Option_BadThing_value, err = __Value_Option_BadThing(&v.BadThing)
+		if err != nil {
+			return nil, err
+		}
+		value = __intrinsic_computeStringFromDriverValuer(Option_BadThing_value)
+	}
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var value, err = v.Hash.Value()
+		if err != nil {
+			return nil, err
+		}
+		value = __intrinsic_computeStringFromDriverValuer(value)
+	}
+	b.WriteString(value)
+	b.WriteByte(')')
+	return b.String(), nil
+}
+func (v *A) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.Kek = next
+	}
+	_ = cur
+	return nil
+}
+func (v *A) Value() (t driver.Value, err error) {
+	var b strings.Builder
+	b.WriteByte('(')
+	var value string
+	value = strconv.Quote(v.Kek)
+	b.WriteString(value)
 	b.WriteByte(')')
 	return b.String(), nil
 }
@@ -505,7 +574,13 @@ func (v *kek) Value() (t driver.Value, err error) {
 	b.WriteByte(')')
 	return b.String(), nil
 }
-func (v *A) Scan(thing any) (err error) {
+func __Scan_Option_BadThing(place *struct {
+	Kek string ""
+	Lol []struct {
+		Kek string ""
+		Lol bool   ""
+	} ""
+}, thing any) (err error) {
 	var source, ok = thing.(string)
 	if !ok {
 		return fmt.Errorf("incompatible type: %+v", thing)
@@ -524,16 +599,131 @@ func (v *A) Scan(thing any) (err error) {
 		return e
 	} else {
 		cur = cur + n
-		v.Kek = next
+		place.Kek = next
+	}
+	{
+		place.Lol = make([]struct {
+			Kek string ""
+			Lol bool   ""
+		}, 0)
+		if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+			return e
+		} else {
+			var sourceLen = len(next)
+			cur = cur + n + 1
+			for cur := 1; cur < sourceLen-1; {
+				place.Lol = append(place.Lol, struct {
+					Kek string ""
+					Lol bool   ""
+				}{})
+				if next, n, e := __intrinsic_readString(unsafe.Slice(unsafe.StringData(next), len(next))[cur:], ')'); n == 0 {
+				} else if e != nil {
+					return e
+				} else {
+					cur = cur + n
+					if e := __Scan_Option_BadThing_Lol(&place.Lol[len(place.Lol)-1], next); e != nil {
+						return e
+					}
+				}
+				cur = cur + 1
+			}
+		}
 	}
 	_ = cur
 	return nil
 }
-func (v *A) Value() (t driver.Value, err error) {
+func __Scan_Option_BadThing_Lol(place *struct {
+	Kek string ""
+	Lol bool   ""
+}, thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		place.Kek = next
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		switch next {
+		case "t":
+			place.Lol = true
+		case "f":
+			place.Lol = false
+		default:
+			panic("bad bool string from postgres: " + next)
+		}
+	}
+	_ = cur
+	return nil
+}
+func __Value_Option_BadThing(place *struct {
+	Kek string ""
+	Lol []struct {
+		Kek string ""
+		Lol bool   ""
+	} ""
+}) (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')
 	var value string
-	value = strconv.Quote(v.Kek)
+	value = strconv.Quote(place.Kek)
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var value2 string
+		var value2Sb strings.Builder
+		value2Sb.WriteByte('{')
+		for i, val := range place.Lol {
+			{
+				var Option_BadThing_Lol_value, err = __Value_Option_BadThing_Lol(&val)
+				if err != nil {
+					return nil, err
+				}
+				value2 = __intrinsic_computeStringFromDriverValuer(Option_BadThing_Lol_value)
+			}
+			value2Sb.WriteString(value2)
+			if i != len(place.Lol)-1 {
+				value2Sb.WriteByte(',')
+			}
+		}
+		value2Sb.WriteByte('}')
+		value = value2Sb.String()
+	}
+	b.WriteString(value)
+	b.WriteByte(')')
+	return b.String(), nil
+}
+func __Value_Option_BadThing_Lol(place *struct {
+	Kek string ""
+	Lol bool   ""
+}) (t driver.Value, err error) {
+	var b strings.Builder
+	b.WriteByte('(')
+	var value string
+	value = strconv.Quote(place.Kek)
+	b.WriteString(value)
+	b.WriteByte(',')
+	if place.Lol {
+		value = "t"
+	} else {
+		value = "f"
+	}
 	b.WriteString(value)
 	b.WriteByte(')')
 	return b.String(), nil
