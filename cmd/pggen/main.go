@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
-	"go/format"
 	"go/parser"
+	"go/printer"
 	"go/token"
 	"go/types"
 	"iter"
@@ -22,8 +22,34 @@ import (
 	pggen "git.apsolutions.ru/aps/Internal/streaming-platform/source-code/libs/pg-composite-parser-gen.git"
 )
 
+const driverValueToStringName = "__intrinsic_computeStringFromDriverValuer"
+const driverValueToString = `
+func __intrinsic_computeStringFromDriverValuer(value driver.Value) string {
+	switch v := value.(type) {
+	case int64:
+		return strconv.FormatInt(v, 10)
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		if v {
+			return "t"
+		} else {
+			return "f"
+		}
+	case []byte:
+		return strconv.Quote("\\x" + hex.EncodeToString(v))
+	case string:
+		return strconv.Quote(v)
+	case time.Time:
+		return strconv.Quote(v.String())
+	default:
+		panic("all is bad: bad value happened inside '__intrinsic_computeStringFromDriverValuer' intrinsic: " + fmt.Sprintf("%#v", value))
+	}
+}
+`
+const readStringName = "__intrinsic_readString"
 const readString = `
-func readString(b []byte, delim byte) (res string, read int, err error) {
+func __intrinsic_readString(b []byte, delim byte) (res string, read int, err error) {
 	switch b[0] {
 	case '"':
 		var buf bytes.Buffer
@@ -224,7 +250,8 @@ func (g *generatorState) GenerateScanForStruct(name string, spec *types.Struct, 
 			g.SliceExpr1(g.I("sourceBytes"), g.I("cur"))))
 	}
 
-	return append(prologue, g.Assign(g.Blank)(g.I("cur")), g.ReturnNil), nil
+	var ignoreCur = g.Assign(g.Blank)(g.I("cur"))
+	return append(prologue, ignoreCur, g.ReturnNil), nil
 }
 
 var (
@@ -290,11 +317,20 @@ func (g *generatorState) renderValuerBasic(typ *types.Basic, what, where ast.Exp
 	}
 }
 func (g *generatorState) renderValuableValuerForField(what, where ast.Expr) ast.Stmt {
-	return g.Block()
+	return g.Block(
+		g.VarDeclInit("value", "err")(g.MethodCall(what, "Value")()),
+		g.If(g.Neq(g.Err, g.Nil))(g.Return(g.Nil, g.Err)),
+		g.Assign(where)(g.FuncCall(driverValueToStringName)(g.I("value"))),
+	)
 }
 func (g *generatorState) renderValuer(typ types.Type, what, where ast.Expr) ast.Stmt {
 	switch v := typ.(type) {
 	case *types.Pointer:
+		return g.IfElse(g.Eq(what, g.Nil))(
+			g.Assign(where)(g.AsLit("")),
+		)(
+			g.renderValuer(v.Elem(), g.Star(what), where),
+		)
 	case *types.Slice:
 		return g.renderValuerRangeable(v.Elem(), what, where)
 	case *types.Array:
@@ -399,7 +435,22 @@ func (g *generatorState) renderScanner(typ types.Type, place, from ast.Expr) ast
 	// TODO: use the same logic like we employ in the slice parser
 	//       to parse the array thing
 	case *types.Array:
-		return g.Block()
+		var arrLen = g.AsLitInt(int(v.Len()))
+		var sliceAsArray = g.I("sliceAsArray")
+		var sliceLen = g.Len(sliceAsArray)
+		return g.Block(
+			g.VarDecl2(g.ValueSpec("sliceAsArray")(g.SliceType(g.ValueTypeExpr(v.Elem())))),
+			g.renderSliceScannerFor(sliceAsArray, from, v.Elem()),
+			g.If(g.Neq(sliceLen, arrLen))(
+				g.Return(
+					g.Errorf(fmt.Sprintf(
+						"bad parsed array element count: got %%d, expected %d", v.Len(),
+					), sliceLen)),
+			),
+			g.Stmt(g.FuncCall("copy")(
+				g.Slice2(place, 0, int(v.Len())), sliceAsArray,
+			)),
+		)
 		// panic("TODO: array parsing")
 	case *types.Named:
 		if _, ok := g.generatedPackages[v.Obj().Pkg()]; ok {
@@ -480,7 +531,7 @@ func (g *generatorState) renderBasicScan(v *types.Basic, place ast.Expr, from as
 func (g *generatorState) renderScannableScannerForField(place, from ast.Expr) *ast.IfStmt {
 	return g.IfElse2(
 		g.AssignStmt("next", "n", "e")(
-			g.FuncCall("readString")(
+			g.FuncCall("__intrinsic_readString")(
 				from,
 				g.AsLitChar(")"))),
 		g.Eq(g.I("n"), g.AsLitInt(0)),
@@ -504,7 +555,7 @@ func (g *generatorState) renderScannableScannerForField(place, from ast.Expr) *a
 func (g *generatorState) renderIntScannerForField(place, from ast.Expr, castTo ast.Expr) *ast.IfStmt {
 	return g.IfElse2(
 		g.AssignStmt("next", "n", "e")(
-			g.FuncCall("readString")(
+			g.FuncCall("__intrinsic_readString")(
 				from,
 				g.AsLitChar(")"))),
 		g.Neq(g.I("e"), g.Nil),
@@ -531,7 +582,7 @@ func (g *generatorState) renderIntScannerForField(place, from ast.Expr, castTo a
 func (g *generatorState) renderFLoatScannerForField(place, from ast.Expr, flavour *ast.Ident, bits int) *ast.IfStmt {
 	return g.IfElse2(
 		g.AssignStmt("next", "n", "e")(
-			g.FuncCall("readString")(
+			g.FuncCall("__intrinsic_readString")(
 				from,
 				g.AsLitChar(")"))),
 		g.Neq(g.I("e"), g.Nil),
@@ -556,7 +607,7 @@ func (g *generatorState) renderFLoatScannerForField(place, from ast.Expr, flavou
 func (g *generatorState) renderBooleanScannerForField(place, from ast.Expr) *ast.IfStmt {
 	return g.If3(
 		g.AssignStmt("next", "n", "e")(
-			g.FuncCall("readString")(
+			g.FuncCall("__intrinsic_readString")(
 				from,
 				g.AsLitChar(")"))),
 		g.Neq(g.I("e"), g.Nil),
@@ -585,7 +636,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, elem types.
 				g.AsLitInt(0))),
 		g.If3(
 			g.AssignStmt("next", "n", "e")(
-				g.FuncCall("readString")(
+				g.FuncCall("__intrinsic_readString")(
 					from,
 					g.AsLitChar(")"))),
 			g.Neq(g.I("e"), g.Nil),
@@ -617,7 +668,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, elem types.
 func (g *generatorState) renderStringScannerForField(place, from ast.Expr) *ast.IfStmt {
 	return g.If3(
 		g.AssignStmt("next", "n", "e")(
-			g.FuncCall("readString")(
+			g.FuncCall("__intrinsic_readString")(
 				from,
 				g.AsLitChar(")"))),
 		g.Neq(g.I("e"), g.Nil),
@@ -1075,7 +1126,7 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 	)(g.If2(
 		g.Assign(
 			g.I("source"), g.Blank, g.Err,
-		)(g.FuncCall("readString")(
+		)(g.FuncCall("__intrinsic_readString")(
 			g.Slice1(g.unsafeBytesRender(g.I("source")), 1),
 			g.AsLitInt(0))),
 		g.ErrNotNil,
@@ -1113,17 +1164,23 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 		}
 	}
 
+	g.Import("database/sql/driver")
 	g.Import("bytes")
+	g.Import("time")
+	g.Import("encoding/hex")
+	g.Import("strconv")
 	var actualFile = g.AsFile(p.Name)
 	var out *os.File
 	var outname = p.Dir + "/zz_scannervaluer.generated.go"
 	if out, err = os.Create(outname); err != nil {
 		panic(err.Error())
 	}
-	if err := format.Node(out, g.fset, actualFile); err != nil {
+	var config = printer.Config{Tabwidth: 4}
+	if err := config.Fprint(out, g.fset, actualFile); err != nil {
 		panic(err.Error())
 	}
 	out.WriteString(readString)
+	out.WriteString(driverValueToString)
 	return nil
 }
 

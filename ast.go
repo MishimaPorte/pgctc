@@ -353,6 +353,15 @@ func (a *AstAcc) FuncCall(name string) func(args ...ast.Expr) *ast.CallExpr {
 		return fc
 	}
 }
+func (a *AstAcc) Errorf(msg string, args ...ast.Expr) *ast.CallExpr {
+	var fc = Alloc[ast.CallExpr](&a.a)
+	fc.Fun = a.ImportAndUse("fmt", "Errorf")
+	var exprs = Allocn[ast.Expr](&a.a, uintptr(len(args)+1))
+	copy(exprs.Slice()[1:], args)
+	*exprs.Items = a.AsLit(msg)
+	fc.Args = exprs.Slice()
+	return fc
+}
 func (a *AstAcc) Return(exprs ...ast.Expr) *ast.ReturnStmt {
 	var ret = Alloc[ast.ReturnStmt](&a.a)
 	ret.Results = Clone(&a.a, exprs).Slice()
@@ -570,6 +579,7 @@ func (a *AstAcc) If3(init ast.Stmt, cond ast.Expr, then ...ast.Stmt) func(elses 
 		return node
 	}
 }
+
 func (a *AstAcc) Assign(lhs ...ast.Expr) func(rhs ...ast.Expr) *ast.AssignStmt {
 	var ass = Alloc[ast.AssignStmt](&a.a)
 	ass.Tok = token.ASSIGN
