@@ -1,14 +1,14 @@
 package types
 
 import (
-	"bytes"
-	"database/sql/driver"
-	"encoding/hex"
 	"fmt"
-	"strconv"
-	"strings"
-	"time"
 	"unsafe"
+	"strings"
+	"strconv"
+	"database/sql/driver"
+	"bytes"
+	"time"
+	"encoding/hex"
 )
 
 func (v *Things) Scan(thing any) (err error) {
@@ -475,7 +475,7 @@ func (v *Option) Value() (t driver.Value, err error) {
 	b.WriteByte(')')
 	return b.String(), nil
 }
-func (v *A) Scan(thing any) (err error) {
+func (v *kek) Scan(thing any) (err error) {
 	var source, ok = thing.(string)
 	if !ok {
 		return fmt.Errorf("incompatible type: %+v", thing)
@@ -499,7 +499,7 @@ func (v *A) Scan(thing any) (err error) {
 	_ = cur
 	return nil
 }
-func (v *A) Value() (t driver.Value, err error) {
+func (v *kek) Value() (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')
 	var value string
@@ -541,7 +541,7 @@ func (v *lol) Value() (t driver.Value, err error) {
 	b.WriteByte(')')
 	return b.String(), nil
 }
-func (v *kek) Scan(thing any) (err error) {
+func (v *A) Scan(thing any) (err error) {
 	var source, ok = thing.(string)
 	if !ok {
 		return fmt.Errorf("incompatible type: %+v", thing)
@@ -565,7 +565,7 @@ func (v *kek) Scan(thing any) (err error) {
 	_ = cur
 	return nil
 }
-func (v *kek) Value() (t driver.Value, err error) {
+func (v *A) Value() (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')
 	var value string
@@ -575,11 +575,11 @@ func (v *kek) Value() (t driver.Value, err error) {
 	return b.String(), nil
 }
 func __Scan_Option_BadThing(place *struct {
-	Kek string ""
-	Lol []struct {
-		Kek string ""
-		Lol bool   ""
-	} ""
+	Kek	string	""
+	Lol	[]struct {
+		Kek	string	""
+		Lol	bool	""
+	}	""
 }, thing any) (err error) {
 	var source, ok = thing.(string)
 	if !ok {
@@ -603,8 +603,8 @@ func __Scan_Option_BadThing(place *struct {
 	}
 	{
 		place.Lol = make([]struct {
-			Kek string ""
-			Lol bool   ""
+			Kek	string	""
+			Lol	bool	""
 		}, 0)
 		if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
 			return e
@@ -613,8 +613,8 @@ func __Scan_Option_BadThing(place *struct {
 			cur = cur + n + 1
 			for cur := 1; cur < sourceLen-1; {
 				place.Lol = append(place.Lol, struct {
-					Kek string ""
-					Lol bool   ""
+					Kek	string	""
+					Lol	bool	""
 				}{})
 				if next, n, e := __intrinsic_readString(unsafe.Slice(unsafe.StringData(next), len(next))[cur:], ')'); n == 0 {
 				} else if e != nil {
@@ -633,8 +633,8 @@ func __Scan_Option_BadThing(place *struct {
 	return nil
 }
 func __Scan_Option_BadThing_Lol(place *struct {
-	Kek string ""
-	Lol bool   ""
+	Kek	string	""
+	Lol	bool	""
 }, thing any) (err error) {
 	var source, ok = thing.(string)
 	if !ok {
@@ -673,11 +673,11 @@ func __Scan_Option_BadThing_Lol(place *struct {
 	return nil
 }
 func __Value_Option_BadThing(place *struct {
-	Kek string ""
-	Lol []struct {
-		Kek string ""
-		Lol bool   ""
-	} ""
+	Kek	string	""
+	Lol	[]struct {
+		Kek	string	""
+		Lol	bool	""
+	}	""
 }) (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')
@@ -710,8 +710,8 @@ func __Value_Option_BadThing(place *struct {
 	return b.String(), nil
 }
 func __Value_Option_BadThing_Lol(place *struct {
-	Kek string ""
-	Lol bool   ""
+	Kek	string	""
+	Lol	bool	""
 }) (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')

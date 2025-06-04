@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/ast"
+	"go/importer"
 	"go/parser"
 	"go/printer"
 	"go/token"
@@ -149,6 +150,7 @@ type jsonPackage struct {
 	XTestImports      []string
 	ForTest           string // q in a "p [q.test]" package, else ""
 	DepOnly           bool
+	Stale             bool
 
 	Error *struct {
 		ImportStack []string
@@ -175,14 +177,20 @@ func absolutize(directory string, fs ...[]string) (res []string) {
 }
 
 var goListBuffer bytes.Buffer
+var goListBufferStderr bytes.Buffer
 
 // NOT THREAD SAFE
-func runGoToolAndIterateResults(ppath ...string) iter.Seq2[*jsonPackage, error] {
+func (g *generatorState) runGoToolAndIterateResults(ppath ...string) iter.Seq2[*jsonPackage, error] {
+	g.logger.Info("calling go list", "ppaths", strings.Join(ppath, ", "))
 	var cmd = exec.Command("go", append([]string{"list", "-e", "-compiled", "-export=true", "-json", "--"}, ppath...)...)
 	goListBuffer.Grow(1024 * 1024)
+	goListBufferStderr.Grow(1024 * 1024)
 	cmd.Stdout = &goListBuffer
+	cmd.Stderr = &goListBufferStderr
 	if err := cmd.Run(); err != nil {
-		return func(yield func(*jsonPackage, error) bool) { yield(nil, err) }
+		return func(yield func(*jsonPackage, error) bool) {
+			yield(nil, fmt.Errorf("error: %w; stderr: %s", err, goListBufferStderr.String()))
+		}
 	}
 	return func(yield func(*jsonPackage, error) bool) {
 		// var dec = json.NewDecoder(io.TeeReader(&buf, os.Stdout))
@@ -210,6 +218,7 @@ type typeNeedsMap map[*types.Package]map[string]needs
 type generatorState struct {
 	logger slog.Logger
 	pggen.AstAcc
+	importer types.Importer
 
 	nowPkg *types.Package
 
@@ -343,7 +352,7 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 			// a scanner implementation ourselves; we queue for generation (if needed)
 			// and then just generate the call
 			if impl(v, valuerIface) {
-				var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "Value")
+				var method, _, _ = types.LookupFieldOrMethod(v, false, v.Obj().Pkg(), "Value")
 				if method != nil {
 					var file = g.fset.File(method.Pos())
 					if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
@@ -760,6 +769,7 @@ type Package struct {
 	Module          *Module
 	Imports         map[string]*Package
 	Errors          []Error
+	Stale           bool
 
 	Syntax    []*ast.File
 	TypesInfo types.Info
@@ -1036,12 +1046,21 @@ func (g *generatorState) addPackage(pkg *Package) (err error) {
 		if lpkg.PkgPath == "unsafe" {
 			return
 		}
+		// var typesPackage, err = g.importer.Import(lpkg.PkgPath)
+		// if err != nil {
+		// 	panic(err.Error())
+		// }
+		// lpkg.Types = typesPackage
+		// return
 		var packages = slices.Collect(maps.Keys(lpkg.Imports))
 		// parsePackages is an EXTREMELY expensive call - it shells away into other executable,
 		// a go list thing. we should batch this as much as we can, and we can batch it more as
 		// leaf nodes with different parents CAN be go list'ed simultaneously.
 		//
 		// TODO: do proper batching
+		// It is needed only in case we need the types from the package, which is extremely rare
+		// (compared to the size of dependency graph of any middle-sized package).
+		// We shall STOP THE FRAUD.
 		lpkg.Imports, _ = g.parsePackages(TypecheckingFlags{false}, packages...)
 		for _, impp := range lpkg.Imports {
 			visit2(impp)
@@ -1076,7 +1095,7 @@ func (g *generatorState) typecheck(pkg *Package) error {
 	pkg.Types = types.NewPackage(pkg.PkgPath, pkg.Name)
 
 	var tc = types.Config{
-		Importer:         pkg.importer(),
+		Importer:         g.importer,
 		IgnoreFuncBodies: true,
 		Error: func(err error) {
 			fmt.Printf("ERROR: %s\n", err.Error())
@@ -1220,7 +1239,6 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 	if packages, err = g.parsePackages(f, ppath); err != nil {
 		return err
 	}
-	// for _, p := range packages {
 	var p = packages[ppath]
 	g.addPackage(p)
 	g.generatedPackages[p.Types] = struct{}{}
@@ -1324,7 +1342,7 @@ func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (ma
 	if len(toList) == 0 {
 		return resp, nil
 	}
-	for p, err := range runGoToolAndIterateResults(toList...) {
+	for p, err := range g.runGoToolAndIterateResults(toList...) {
 		if err != nil {
 			return nil, err
 		}
@@ -1350,6 +1368,7 @@ func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (ma
 			IgnoredFiles:    absolutize(p.Dir, p.IgnoredGoFiles, p.IgnoredOtherFiles),
 			ForTest:         p.ForTest,
 			Module:          p.Module,
+			Stale:           p.Stale,
 		}
 		if f.TypecheckCgo && len(pkg.CompiledGoFiles) != 0 {
 			panic("implement cgo typechecking!")
@@ -1453,6 +1472,7 @@ func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (ma
 func main() {
 	var g generatorState
 	g.generatedPackages = make(map[*types.Package]struct{})
+	g.importer = importer.ForCompiler(token.NewFileSet(), "source", nil)
 	g.typeNeeds = make(typeNeedsMap)
 	g.seenTypes = make(typeNeedsMap)
 	g.seen = make(map[string]*jsonPackage)
@@ -1463,14 +1483,11 @@ func main() {
 	var pathname = os.Args[1]
 	var err error
 
-	var m map[string]*Package
-	if m, err = g.parsePackages(TypecheckingFlags{false}, "database/sql/driver"); err != nil {
+	var dsd *types.Package
+	if dsd, err = g.importer.Import("database/sql/driver"); err != nil {
 		panic(err.Error())
 	}
-	if err = g.addPackage(m["database/sql/driver"]); err != nil {
-		panic(err.Error())
-	}
-	valuerIface = m["database/sql/driver"].Types.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
+	valuerIface = dsd.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
 	if err = g.ParseModuleAndGenerate(TypecheckingFlags{false}, pathname); err != nil {
 		panic(err.Error())
 	}
