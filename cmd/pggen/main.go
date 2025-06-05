@@ -1753,7 +1753,12 @@ func (g *generatorState) ZeroValue(typ types.Type) ast.Expr {
 		if pkg != g.nowPkg {
 			g.AstAcc.Import(pkg.Path())
 		}
-		return g.Cast(g.ZeroValue(v.Underlying()), g.ValueTypeExpr(v))
+		switch v.Underlying().(type) {
+		case *types.Struct, *types.Array:
+			return g.CompositeLiteral(g.I(v.Obj().Name()))()
+		default:
+			return g.Cast(g.ZeroValue(v.Underlying()), g.ValueTypeExpr(v))
+		}
 	case *types.Chan, *types.Interface,
 		*types.Map, *types.Pointer, *types.Signature,
 		*types.Slice:
