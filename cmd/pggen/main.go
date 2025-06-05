@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/importer"
@@ -12,13 +13,12 @@ import (
 	"go/types"
 	"iter"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	pggen "git.apsolutions.ru/aps/Internal/streaming-platform/source-code/libs/pg-composite-parser-gen.git"
@@ -179,6 +179,30 @@ func absolutize(directory string, fs ...[]string) (res []string) {
 var goListBuffer bytes.Buffer
 var goListBufferStderr bytes.Buffer
 
+type bufferPair struct {
+	stdout bytes.Buffer
+	stderr bytes.Buffer
+}
+
+func (g *generatorState) allocBufferPair() bufferPair {
+	var p bufferPair
+	p.stdout.Grow(1024 * 1024)
+	p.stderr.Grow(1024 * 1024)
+	return p
+}
+
+func (g *generatorState) runGoToolOnce(ppath string, out *jsonPackage) error {
+	g.logger.Info("calling go list", "ppaths", ppath)
+	var cmd = exec.Command("go", "list", "-e", "-compiled", "-export=true", "-json", "--", ppath)
+	var p = g.allocBufferPair()
+	cmd.Stdout = &p.stdout
+	cmd.Stderr = &p.stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("error: %w; stderr: %s", err, p.stderr.String())
+	}
+	return json.NewDecoder(&p.stdout).Decode(out)
+}
+
 // NOT THREAD SAFE
 func (g *generatorState) runGoToolAndIterateResults(ppath ...string) iter.Seq2[*jsonPackage, error] {
 	g.logger.Info("calling go list", "ppaths", strings.Join(ppath, ", "))
@@ -222,12 +246,12 @@ type generatorState struct {
 
 	nowPkg *types.Package
 
-	seen    map[string]*jsonPackage
 	pkgs    map[string]*Package
+	pkgsMut sync.Mutex
+
 	checked map[*Package]struct{}
 	fset    *token.FileSet
 
-	generatedPackages map[*types.Package]struct{}
 	// named types that we encounter and that we need to generate
 	// scanner and valuer implementations for.
 	typeNeeds          typeNeedsMap
@@ -334,6 +358,10 @@ func (g *generatorState) renderValuableValuerForField(what, where ast.Expr) ast.
 		g.Assign(where)(g.FuncCall(driverValueToStringName)(g.I("value"))),
 	)
 }
+func (g *generatorState) handlePodType(typ types.Type, parent string, what, where ast.Expr) ast.Stmt {
+	return nil
+}
+
 func (g *generatorState) renderValuer(typ types.Type, parent string, what, where ast.Expr) ast.Stmt {
 	switch v := typ.(type) {
 	case *types.Pointer:
@@ -347,27 +375,7 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 	case *types.Array:
 		return g.renderValuerRangeable(v.Elem(), parent, what, where)
 	case *types.Named:
-		if _, ok := g.generatedPackages[v.Obj().Pkg()]; ok {
-			// For packages that we do actually care about we may generate
-			// a scanner implementation ourselves; we queue for generation (if needed)
-			// and then just generate the call
-			if impl(v, valuerIface) {
-				var method, _, _ = types.LookupFieldOrMethod(v, false, v.Obj().Pkg(), "Value")
-				if method != nil {
-					var file = g.fset.File(method.Pos())
-					if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
-						return g.renderValuableValuerForField(what, where)
-					}
-				}
-			}
-			g.queueObjForValuer(v.Obj())
-			return g.renderValuableValuerForField(what, where)
-		} else if impl(v, valuerIface) {
-			// For external types implementing the driver.Valuer interface
-			return g.renderValuableValuerForField(what, where)
-		} else {
-			panic("TODO: return error probably or something")
-		}
+		return g.handleNamedValuer(v, what, where)
 	case *types.Basic:
 		return g.renderValuerBasic(v, what, where)
 	case *types.Alias:
@@ -401,6 +409,31 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 		panic(fmt.Sprintf("unexpected type kind(%T): %#v", v, v))
 	}
 	panic("unreachable")
+}
+
+func (g *generatorState) handleNamedValuer(v *types.Named, what ast.Expr, where ast.Expr) ast.Stmt {
+	var pkg = g.makepkg(v.Obj().Pkg().Path())
+	if pkg.isGenerated {
+		// For packages that we do actually care about we may generate
+		// a scanner implementation ourselves; we queue for generation (if needed)
+		// and then just generate the call
+		if impl(v, valuerIface) {
+			var method, _, _ = types.LookupFieldOrMethod(v, false, v.Obj().Pkg(), "Value")
+			if method != nil {
+				var file = g.fset.File(method.Pos())
+				if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
+					return g.renderValuableValuerForField(what, where)
+				}
+			}
+		}
+		g.queueObjForValuer(v.Obj())
+		return g.renderValuableValuerForField(what, where)
+	} else if impl(v, valuerIface) {
+		// For external types implementing the driver.Valuer interface
+		return g.renderValuableValuerForField(what, where)
+	} else {
+		panic("TODO: return error probably or something")
+	}
 }
 
 func (g *generatorState) renderValuerRangeable(elem types.Type, typename string, what ast.Expr, where ast.Expr) ast.Stmt {
@@ -463,7 +496,8 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 			)),
 		)
 	case *types.Named:
-		if _, ok := g.generatedPackages[v.Obj().Pkg()]; ok {
+		var pkg = g.makepkg(v.Obj().Pkg().Path())
+		if pkg.isGenerated {
 			// For packages that we do actually care about we may generate
 			// a scanner implementation ourselves; we queue for generation (if needed)
 			// and then just generate the call
@@ -722,10 +756,6 @@ func (g *generatorState) renderStringScannerForField(place, from ast.Expr) *ast.
 				g.I("next"))))
 }
 
-type importerFunc func(path string) (*types.Package, error)
-
-func (f importerFunc) Import(path string) (*types.Package, error) { return f(path) }
-
 type Error struct {
 	Pos  string
 	Msg  string
@@ -752,7 +782,30 @@ func (err Error) Error() string {
 	return pos + ": " + err.Msg
 }
 
+const (
+	flags_loadingHappened = 1 << 0
+	flags_hasSyntaxParsed = 1 << 1
+	flags_hasTypesChecked = 1 << 2
+)
+
+type waitItem struct {
+	error error
+	sig   chan struct{}
+}
+
 type Package struct {
+	// an atomic flags variable.
+	// for a flag like `flags_isLoaded` use it like this:
+	// (atomic.OrUint64(&lpkg.flags, flags_isLoaded) & flags_isLoaded) == 0
+	//
+	// This performs kind of a compare-and-swap operation, but on bitwise level.
+	flags   uint64
+	types   waitItem
+	syntax  waitItem
+	loading waitItem
+
+	isGenerated bool
+
 	Name            string
 	ID              string
 	PkgPath         string
@@ -774,6 +827,50 @@ type Package struct {
 	Syntax    []*ast.File
 	TypesInfo types.Info
 	Types     *types.Package
+}
+
+func (l *waitItem) Err(err error) error {
+	l.error = err
+	close(l.sig)
+	return err
+}
+func (l *waitItem) Ok() error {
+	close(l.sig)
+	return nil
+}
+func (l *waitItem) Wait() error {
+	<-l.sig
+	return l.error
+}
+
+// This is not a method since the go compiler cannot possibly
+// NOT overwrite the register it passes g pointer in with a 4 (a literal four).
+// It must be a bug in register allocation or something.
+func NeedTypes(lpkg *Package, g *generatorState) (err error) {
+	if (atomic.OrUint64(&lpkg.flags, flags_hasTypesChecked) & flags_hasTypesChecked) != 0 {
+		return lpkg.types.Wait()
+	}
+
+	if lpkg.Types != nil {
+		return lpkg.types.Ok()
+	}
+	err = g.Import(lpkg)
+	return lpkg.types.Err(err)
+}
+
+func (g *generatorState) Import(lpkg *Package) (err error) {
+	g.logger.Info("importing a package from source probably", "ppath", lpkg.PkgPath)
+	lpkg.Types, err = g.importer.Import(lpkg.PkgPath)
+	return err
+}
+
+func (g *generatorState) NeedSyntax(lpkg *Package) (err error) {
+	if err = g.InspectOne(TypecheckingFlags{false}, lpkg); err != nil {
+		return err
+	}
+	// we dont really want to parse this syncronously, but i am too fucked
+	// to do this properly too this time. TODO: do better, moron
+	return g.ParseSyntaxSync(lpkg)
 }
 
 type TypecheckingFlags struct {
@@ -918,11 +1015,7 @@ func (g *generatorState) queueObjForValuer(obj types.Object) {
 // - #[generate(Scanner)]
 // - #[exclude(Valuer)]
 // - #[exclude(Scanner)]
-func (g *generatorState) queueByMacros(pkg *types.Package, decl ast.Decl) {
-	if _, ok := g.generatedPackages[pkg]; !ok {
-		// TODO: maybe issue a warning here? idk
-		return
-	}
+func (g *generatorState) queueByMacros(scope *types.Scope, decl ast.Decl) {
 	switch gd := decl.(type) {
 	case *ast.GenDecl:
 		if gd.Tok == token.TYPE {
@@ -988,7 +1081,6 @@ func (g *generatorState) queueByMacros(pkg *types.Package, decl ast.Decl) {
 							}
 						}
 					}
-					var scope = pkg.Scope()
 					if locscanner {
 						g.queueObjForScanner(scope.Lookup(s.Name.Name))
 					}
@@ -1002,83 +1094,91 @@ func (g *generatorState) queueByMacros(pkg *types.Package, decl ast.Decl) {
 	}
 }
 
-func (p *Package) ParseSyntaxSync(g *generatorState) error {
-	if p.Syntax != nil {
-		return nil
+func (g *generatorState) ParseSyntaxSync(lpkg *Package) error {
+	var flag = atomic.OrUint64(&lpkg.flags, flags_hasSyntaxParsed) & flags_hasSyntaxParsed
+	if flag != 0 {
+		return lpkg.syntax.Wait()
 	}
-	var out = make([]*ast.File, len(p.CompiledGoFiles))
+
+	var out = make([]*ast.File, len(lpkg.CompiledGoFiles))
 	var wg sync.WaitGroup
-	wg.Add(len(p.CompiledGoFiles))
-	// TODO: error handling
-	for i, filename := range p.CompiledGoFiles {
+	wg.Add(len(lpkg.CompiledGoFiles))
+	var errAll error
+	var srcs = make([][]byte, len(lpkg.CompiledGoFiles))
+	for i, filename := range lpkg.CompiledGoFiles {
 		go func(i int, filename string) {
-			var src, err = os.ReadFile(filename)
-			if err != nil {
+			var err error
+			if srcs[i], err = os.ReadFile(filename); err != nil {
+				errAll = errors.Join(errAll, err)
 				wg.Done()
-				panic(err)
-			}
-			if out[i], err = parser.ParseFile(
-				g.fset, filename, src,
-				parser.SkipObjectResolution|parser.ParseComments,
-			); err != nil {
-				wg.Done()
-				panic(err)
+				return
 			}
 			wg.Done()
 		}(i, filename)
 	}
 	wg.Wait()
-	p.Syntax = out
-	return nil
-}
-
-// the package should have the syntax parsed
-func (g *generatorState) addPackage(pkg *Package) (err error) {
-	if _, checked := g.checked[pkg]; checked {
-		return
-	}
-
-	// TODO: do error reporting
-	// visit all the children first, you know.
-	var visit2 func(*Package)
-	visit2 = func(lpkg *Package) {
-		// get this shit out of here
-		if lpkg.PkgPath == "unsafe" {
-			return
-		}
-		// var typesPackage, err = g.importer.Import(lpkg.PkgPath)
-		// if err != nil {
-		// 	panic(err.Error())
-		// }
-		// lpkg.Types = typesPackage
-		// return
-		var packages = slices.Collect(maps.Keys(lpkg.Imports))
-		// parsePackages is an EXTREMELY expensive call - it shells away into other executable,
-		// a go list thing. we should batch this as much as we can, and we can batch it more as
-		// leaf nodes with different parents CAN be go list'ed simultaneously.
-		//
-		// TODO: do proper batching
-		// It is needed only in case we need the types from the package, which is extremely rare
-		// (compared to the size of dependency graph of any middle-sized package).
-		// We shall STOP THE FRAUD.
-		lpkg.Imports, _ = g.parsePackages(TypecheckingFlags{false}, packages...)
-		for _, impp := range lpkg.Imports {
-			visit2(impp)
-		}
-		// we dont really want to parse this syncronously, but i am too fucked
-		// to do this properly too this time. TODO: do better, moron
-		if err := lpkg.ParseSyntaxSync(g); err != nil {
-			panic(err)
-		}
-		// we are traversing the graph depth-first, so in theory the leaves should be processed
-		// before the non-leaves
-		if err := g.typecheck(lpkg); err != nil {
-			panic(err)
+	for i := range srcs {
+		if srcs[i] != nil {
+			var err error
+			if out[i], err = parser.ParseFile(
+				g.fset, lpkg.CompiledGoFiles[i], srcs[i],
+				parser.SkipObjectResolution|parser.ParseComments,
+			); err != nil {
+				errAll = errors.Join(errAll, err)
+			}
 		}
 	}
-	visit2(pkg)
-	return g.typecheck(pkg)
+	lpkg.Syntax = out
+	return lpkg.syntax.Err(errAll)
 }
+
+// // the package should have the syntax parsed
+// func (g *generatorState) addPackage(pkg *Package) (err error) {
+// 	if _, checked := g.checked[pkg]; checked {
+// 		return
+// 	}
+//
+// 	// TODO: do error reporting
+// 	// visit all the children first, you know.
+// 	var visit2 func(*Package)
+// 	visit2 = func(lpkg *Package) {
+// 		// get this shit out of here
+// 		if lpkg.PkgPath == "unsafe" {
+// 			return
+// 		}
+// 		var typesPackage, err = g.importer.Import(lpkg.PkgPath)
+// 		if err != nil {
+// 			panic(err.Error())
+// 		}
+// 		lpkg.Types = typesPackage
+// 		return
+// 		var packages = slices.Collect(maps.Keys(lpkg.Imports))
+// 		// parsePackages is an EXTREMELY expensive call - it shells away into other executable,
+// 		// a go list thing. we should batch this as much as we can, and we can batch it more as
+// 		// leaf nodes with different parents CAN be go list'ed simultaneously.
+// 		//
+// 		// TODO: do proper batching
+// 		// It is needed only in case we need the types from the package, which is extremely rare
+// 		// (compared to the size of dependency graph of any middle-sized package).
+// 		// We shall STOP THE FRAUD.
+// 		lpkg.Imports, _ = g.inspectMany(TypecheckingFlags{false}, packages...)
+// 		for _, impp := range lpkg.Imports {
+// 			visit2(impp)
+// 		}
+// 		// we dont really want to parse this syncronously, but i am too fucked
+// 		// to do this properly too this time. TODO: do better, moron
+// 		if err := lpkg.ParseSyntaxSync(g); err != nil {
+// 			panic(err)
+// 		}
+// 		// we are traversing the graph depth-first, so in theory the leaves should be processed
+// 		// before the non-leaves
+// 		if err := g.typecheck(lpkg); err != nil {
+// 			panic(err)
+// 		}
+// 	}
+// 	visit2(pkg)
+// 	return g.typecheck(pkg)
+// }
 
 func (g *generatorState) typecheck(pkg *Package) error {
 	if pkg.Types != nil {
@@ -1105,24 +1205,6 @@ func (g *generatorState) typecheck(pkg *Package) error {
 	return types.NewChecker(&tc, g.fset, pkg.Types, &pkg.TypesInfo).Files(pkg.Syntax)
 }
 
-func (p *Package) importer() importerFunc {
-	return importerFunc(func(path string) (*types.Package, error) {
-		if path == "unsafe" {
-			return types.Unsafe, nil
-		}
-		var ipkg = p.Imports[path]
-		if ipkg == nil {
-			return nil, fmt.Errorf("no metadata for %s", path)
-		}
-
-		if ipkg.Types != nil && ipkg.Types.Complete() {
-			return ipkg.Types, nil
-		}
-		fmt.Printf("FATAL: internal error: package %q without types was imported from %q", path, p.ID)
-		panic("unreachable")
-	})
-}
-
 func (g *generatorState) generateValuerForAnonStruct(t *types.Struct, namelet string, prologue []ast.Stmt) error {
 	var body = g.createValuerBodyStruct(prologue, namelet, g.I("place"), t)
 	g.CreateFunc("__Value_"+namelet)(
@@ -1136,6 +1218,14 @@ func (g *generatorState) generateValuerForAnonStruct(t *types.Struct, namelet st
 func (g *generatorState) generateValuerForType(t types.Type, name string, prologue []ast.Stmt) error {
 	g.logger.Info("generating valuer", "name", name)
 	switch v := t.(type) {
+	case *types.Slice:
+		g.CreateMethod("Value", "v", name, true)()(
+			g.Param("t", g.ImportAndUse2("database/sql/driver", "driver", "Value")),
+			g.Param("err", g.I("error")),
+		)(
+			g.Stmt(
+				g.FuncCall("panic")(
+					g.AsLit("The slice conversion is not implemented yet."))))
 	case *types.Struct:
 		var body = g.createValuerBodyStruct(prologue, name, g.I("v"), v)
 		g.CreateMethod("Value", "v", name, true)()(
@@ -1235,19 +1325,19 @@ func (g *generatorState) generateScanForType(t types.Type, name string, prologue
 	return nil
 }
 func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath string) (err error) {
-	var packages map[string]*Package
-	if packages, err = g.parsePackages(f, ppath); err != nil {
+	var mainPackage = g.makepkg(ppath)
+	mainPackage.isGenerated = true
+	if err = g.NeedSyntax(mainPackage); err != nil {
 		return err
 	}
-	var p = packages[ppath]
-	g.addPackage(p)
-	g.generatedPackages[p.Types] = struct{}{}
-	for _, file := range p.Syntax {
+	if err = NeedTypes(mainPackage, g); err != nil {
+		return err
+	}
+	for _, file := range mainPackage.Syntax {
 		for _, decl := range file.Decls {
-			g.queueByMacros(p.Types, decl)
+			g.queueByMacros(mainPackage.Types.Scope(), decl)
 		}
 	}
-	// }
 	var declVars = g.VarDeclInit("source", "ok")(g.TypeAssert("thing")(g.I("string")))
 	var errorf = g.ImportAndCall("fmt", "Errorf")(g.AsLit("incompatible type: %+v"), g.I("thing"))
 	var ifNotOkRet = g.If(g.Nok)(g.Return(errorf))
@@ -1308,14 +1398,14 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 		}
 	}
 
-	g.Import("database/sql/driver")
-	g.Import("bytes")
-	g.Import("time")
-	g.Import("encoding/hex")
-	g.Import("strconv")
-	var actualFile = g.AsFile(p.Name)
+	g.AstAcc.Import("database/sql/driver")
+	g.AstAcc.Import("bytes")
+	g.AstAcc.Import("time")
+	g.AstAcc.Import("encoding/hex")
+	g.AstAcc.Import("strconv")
+	var actualFile = g.AsFile(mainPackage.Name)
 	var out *os.File
-	var outname = p.Dir + "/zz_scannervaluer.generated.go"
+	var outname = mainPackage.Dir + "/zz_scannervaluer.generated.go"
 	if out, err = os.Create(outname); err != nil {
 		panic(err.Error())
 	}
@@ -1328,16 +1418,56 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 	return nil
 }
 
-func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (map[string]*Package, error) {
+// allocates a package
+func (g *generatorState) makepkg(pkgPath string) *Package {
+	var lpkg *Package
+	g.pkgsMut.Lock()
+	lpkg = g.pkgs[pkgPath]
+	if lpkg != nil {
+		g.pkgsMut.Unlock()
+		return lpkg
+	}
+	lpkg = new(Package)
+	lpkg.PkgPath = pkgPath
+	lpkg.flags = 0
+	lpkg.loading.sig = make(chan struct{})
+	lpkg.syntax.sig = make(chan struct{})
+	lpkg.types.sig = make(chan struct{})
+	g.pkgs[pkgPath] = lpkg
+	g.pkgsMut.Unlock()
+	return lpkg
+}
 
+// Inspecting is really needed only when we want to parse the thing
+// from source
+func (g *generatorState) InspectOne(f TypecheckingFlags, lpkg *Package) error {
+	var flag = atomic.OrUint64(&lpkg.flags, flags_loadingHappened) & flags_loadingHappened
+	fmt.Println(flag)
+	if flag != 0 {
+		return lpkg.loading.Wait()
+	}
+
+	var jp jsonPackage
+	if err := g.runGoToolOnce(lpkg.PkgPath, &jp); err != nil {
+		return lpkg.loading.Err(err)
+	}
+
+	if err := g.processSingleGoListPackage(f, &jp, lpkg); err != nil {
+		return lpkg.loading.Err(err)
+	}
+
+	return lpkg.loading.Ok()
+}
+
+func (g *generatorState) inspectMany(f TypecheckingFlags, ppath ...string) (map[string]*Package, error) {
 	var resp = make(map[string]*Package)
 	var toList = make([]string, 0, len(ppath))
 	for _, name := range ppath {
-		if p, ok := g.pkgs[name]; ok {
-			resp[name] = p
-		} else {
+		var lpkg = g.makepkg(name)
+		if (atomic.OrUint64(&lpkg.flags, flags_loadingHappened) & flags_loadingHappened) != 0 {
 			toList = append(toList, name)
 		}
+		resp[name] = lpkg
 	}
 	if len(toList) == 0 {
 		return resp, nil
@@ -1346,115 +1476,109 @@ func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (ma
 		if err != nil {
 			return nil, err
 		}
-		if p.ImportPath == "" {
-			return nil, fmt.Errorf("empty import path for %+v", p)
+		if err = g.processSingleGoListPackage(f, p, resp[p.ImportPath]); err != nil {
+			return nil, err
 		}
-		if filepath.IsAbs(p.ImportPath) && p.Error != nil {
-			panic("TODO: implement this logic from packages")
-		}
+	}
+	return resp, nil
+}
 
-		g.seen[p.ImportPath] = p
-
-		var pkg = Package{
-			Name:            p.Name,
-			ID:              p.ImportPath,
-			Dir:             p.Dir,
-			Target:          p.Target,
-			GoFiles:         absolutize(p.Dir, p.GoFiles, p.CgoFiles),
-			CompiledGoFiles: absolutize(p.Dir, p.CompiledGoFiles),
-			OtherFiles:      absolutize(p.Dir, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles, p.SwigFiles, p.SwigCXXFiles, p.SysoFiles),
-			EmbedFiles:      absolutize(p.Dir, p.EmbedFiles),
-			EmbedPatterns:   absolutize(p.Dir, p.EmbedPatterns),
-			IgnoredFiles:    absolutize(p.Dir, p.IgnoredGoFiles, p.IgnoredOtherFiles),
-			ForTest:         p.ForTest,
-			Module:          p.Module,
-			Stale:           p.Stale,
-		}
-		if f.TypecheckCgo && len(pkg.CompiledGoFiles) != 0 {
-			panic("implement cgo typechecking!")
-		}
-
-		if len(pkg.CompiledGoFiles) != 0 {
-			var out = pkg.CompiledGoFiles[:0]
-			for _, f := range pkg.CompiledGoFiles {
-				// trash non-go and cached cgo files
-				if ext := filepath.Ext(f); ext != ".go" && ext != "" {
-					continue
-				}
-				out = append(out, f)
-			}
-			pkg.CompiledGoFiles = out
-		}
-
-		if i := strings.IndexByte(pkg.ID, ' '); i >= 0 {
-			pkg.PkgPath = pkg.ID[:i]
-		} else {
-			pkg.PkgPath = pkg.ID
-		}
-
-		if pkg.PkgPath == "unsafe" {
-			pkg.CompiledGoFiles = nil // ignore unsafe
-		}
-
-		// Assume go list emits only absolute paths for Dir.
-		if p.Dir != "" && !filepath.IsAbs(p.Dir) {
-			return nil, fmt.Errorf("relative Package.Dir %q received from go list", p.Dir)
-		}
-
-		if p.Export != "" && !filepath.IsAbs(p.Export) {
-			pkg.ExportFile = filepath.Join(p.Dir, p.Export)
-		} else {
-			pkg.ExportFile = p.Export
-		}
-
-		var ids = make(map[string]bool)
-		for _, id := range p.Imports {
-			ids[id] = true
-		}
-
-		pkg.Imports = make(map[string]*Package)
-		for path, id := range p.ImportMap {
-			if id == "C" {
-				delete(ids, id)
-				continue
-			}
-			// non-identity import
-			pkg.Imports[path] = &Package{ID: id}
-			delete(ids, id)
-		}
-
-		// identity import
-		for id := range ids {
-			pkg.Imports[id] = &Package{ID: id}
-		}
-
-		// if !p.DepOnly {
-		// 	roots = append(roots, pkg.ID)
-		// }
-
-		// some error thing
-		if err := p.Error; err != nil && shouldAddFilenameFromError {
-			fmt.Println(err)
-		}
-
-		if p.Error != nil {
-			msg := strings.TrimSpace(p.Error.Err)
-			if msg == "import cycle not allowed" && len(p.Error.ImportStack) != 0 {
-				msg += fmt.Sprintf(": import stack: %v", p.Error.ImportStack)
-			}
-			pkg.Errors = append(pkg.Errors, Error{
-				Pos:  p.Error.Pos,
-				Msg:  msg,
-				Kind: ListError,
-			})
-		}
-
-		var pkgp = &pkg
-		resp[pkgp.PkgPath] = pkgp
-		g.pkgs[pkg.ID] = pkgp
+func (g *generatorState) processSingleGoListPackage(f TypecheckingFlags, p *jsonPackage, pkg *Package) (err error) {
+	if p.ImportPath == "" {
+		return fmt.Errorf("empty import path for %+v", p)
+	}
+	if filepath.IsAbs(p.ImportPath) && p.Error != nil {
+		panic("TODO: implement this logic from packages")
 	}
 
-	return resp, nil
+	pkg.Name = p.Name
+	pkg.ID = p.ImportPath
+	pkg.Dir = p.Dir
+	pkg.Target = p.Target
+	pkg.GoFiles = absolutize(p.Dir, p.GoFiles, p.CgoFiles)
+	pkg.CompiledGoFiles = absolutize(p.Dir, p.CompiledGoFiles)
+	pkg.OtherFiles = absolutize(p.Dir, p.CFiles, p.CXXFiles, p.MFiles, p.HFiles, p.FFiles, p.SFiles, p.SwigFiles, p.SwigCXXFiles, p.SysoFiles)
+	pkg.EmbedFiles = absolutize(p.Dir, p.EmbedFiles)
+	pkg.EmbedPatterns = absolutize(p.Dir, p.EmbedPatterns)
+	pkg.IgnoredFiles = absolutize(p.Dir, p.IgnoredGoFiles, p.IgnoredOtherFiles)
+	pkg.ForTest = p.ForTest
+	pkg.Module = p.Module
+	pkg.Stale = p.Stale
+	if f.TypecheckCgo && len(pkg.CompiledGoFiles) != 0 {
+		panic("implement cgo typechecking!")
+	}
+
+	if len(pkg.CompiledGoFiles) != 0 {
+		var out = pkg.CompiledGoFiles[:0]
+		for _, f := range pkg.CompiledGoFiles {
+			// trash non-go and cached cgo files
+			if ext := filepath.Ext(f); ext != ".go" && ext != "" {
+				continue
+			}
+			out = append(out, f)
+		}
+		pkg.CompiledGoFiles = out
+	}
+
+	if i := strings.IndexByte(pkg.ID, ' '); i >= 0 {
+		pkg.PkgPath = pkg.ID[:i]
+	} else {
+		pkg.PkgPath = pkg.ID
+	}
+
+	if pkg.PkgPath == "unsafe" {
+		pkg.CompiledGoFiles = nil // ignore unsafe
+	}
+
+	// Assume go list emits only absolute paths for Dir.
+	if p.Dir != "" && !filepath.IsAbs(p.Dir) {
+		return fmt.Errorf("relative Package.Dir %q received from go list", p.Dir)
+	}
+
+	if p.Export != "" && !filepath.IsAbs(p.Export) {
+		pkg.ExportFile = filepath.Join(p.Dir, p.Export)
+	} else {
+		pkg.ExportFile = p.Export
+	}
+
+	var ids = make(map[string]bool)
+	for _, id := range p.Imports {
+		ids[id] = true
+	}
+
+	pkg.Imports = make(map[string]*Package)
+	for path, id := range p.ImportMap {
+		if id == "C" {
+			delete(ids, id)
+			continue
+		}
+		// non-identity import
+		pkg.Imports[path] = &Package{ID: id}
+		delete(ids, id)
+	}
+
+	// identity import
+	for id := range ids {
+		pkg.Imports[id] = &Package{ID: id}
+	}
+
+	// some error thing
+	if err := p.Error; err != nil && shouldAddFilenameFromError {
+		fmt.Println(err)
+	}
+
+	if p.Error != nil {
+		msg := strings.TrimSpace(p.Error.Err)
+		if msg == "import cycle not allowed" && len(p.Error.ImportStack) != 0 {
+			msg += fmt.Sprintf(": import stack: %v", p.Error.ImportStack)
+		}
+		pkg.Errors = append(pkg.Errors, Error{
+			Pos:  p.Error.Pos,
+			Msg:  msg,
+			Kind: ListError,
+		})
+	}
+	return nil
 }
 
 // TODO: deduce the output file from the passed packages;
@@ -1470,24 +1594,24 @@ func (g *generatorState) parsePackages(f TypecheckingFlags, ppath ...string) (ma
 // TODO: take all the ast-centric things out into a library and make it more general than
 // whatever is needed here.
 func main() {
+	var fset = token.NewFileSet()
 	var g generatorState
-	g.generatedPackages = make(map[*types.Package]struct{})
-	g.importer = importer.ForCompiler(token.NewFileSet(), "source", nil)
+	g.importer = importer.ForCompiler(fset, "source", nil)
 	g.typeNeeds = make(typeNeedsMap)
 	g.seenTypes = make(typeNeedsMap)
-	g.seen = make(map[string]*jsonPackage)
 	g.pkgs = make(map[string]*Package)
-	g.fset = token.NewFileSet()
+	g.fset = fset
 	g.logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
 	pggen.InitAstAcc(&g.AstAcc)
 	var pathname = os.Args[1]
+	// var pathname = "git.apsolutions.ru/aps/Internal/streaming-platform/source-code/libs/pg-composite-parser-gen.git/example/types"
 	var err error
 
-	var dsd *types.Package
-	if dsd, err = g.importer.Import("database/sql/driver"); err != nil {
+	var dsd = g.makepkg("database/sql/driver")
+	if err = NeedTypes(dsd, &g); err != nil {
 		panic(err.Error())
 	}
-	valuerIface = dsd.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
+	valuerIface = dsd.Types.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
 	if err = g.ParseModuleAndGenerate(TypecheckingFlags{false}, pathname); err != nil {
 		panic(err.Error())
 	}
@@ -1599,7 +1723,7 @@ func (g *generatorState) ZeroValue(typ types.Type) ast.Expr {
 	case *types.Named:
 		var pkg = v.Obj().Pkg()
 		if pkg != g.nowPkg {
-			g.Import(pkg.Path())
+			g.AstAcc.Import(pkg.Path())
 		}
 		return g.Cast(g.ZeroValue(v.Underlying()), g.ValueTypeExpr(v))
 	case *types.Chan, *types.Interface,

@@ -296,6 +296,15 @@ func (v *Option) Scan(thing any) (err error) {
 			return e
 		}
 	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.Extern.Scan(next); e != nil {
+			return e
+		}
+	}
 	_ = cur
 	return nil
 }
@@ -472,38 +481,14 @@ func (v *Option) Value() (t driver.Value, err error) {
 		value = __intrinsic_computeStringFromDriverValuer(value)
 	}
 	b.WriteString(value)
-	b.WriteByte(')')
-	return b.String(), nil
-}
-func (v *kek) Scan(thing any) (err error) {
-	var source, ok = thing.(string)
-	if !ok {
-		return fmt.Errorf("incompatible type: %+v", thing)
-	}
-	if source[0] == '"' {
-		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
-			return err
+	b.WriteByte(',')
+	{
+		var value, err = v.Extern.Value()
+		if err != nil {
+			return nil, err
 		}
+		value = __intrinsic_computeStringFromDriverValuer(value)
 	}
-	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
-	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
-		return fmt.Errorf("bad source string: %q", source)
-	}
-	var cur = 1
-	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
-		return e
-	} else {
-		cur = cur + n
-		v.Kek = next
-	}
-	_ = cur
-	return nil
-}
-func (v *kek) Value() (t driver.Value, err error) {
-	var b strings.Builder
-	b.WriteByte('(')
-	var value string
-	value = strconv.Quote(v.Kek)
 	b.WriteString(value)
 	b.WriteByte(')')
 	return b.String(), nil
@@ -533,6 +518,39 @@ func (v *lol) Scan(thing any) (err error) {
 	return nil
 }
 func (v *lol) Value() (t driver.Value, err error) {
+	var b strings.Builder
+	b.WriteByte('(')
+	var value string
+	value = strconv.Quote(v.Kek)
+	b.WriteString(value)
+	b.WriteByte(')')
+	return b.String(), nil
+}
+func (v *kek) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.Kek = next
+	}
+	_ = cur
+	return nil
+}
+func (v *kek) Value() (t driver.Value, err error) {
 	var b strings.Builder
 	b.WriteByte('(')
 	var value string

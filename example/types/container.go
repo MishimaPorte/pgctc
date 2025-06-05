@@ -1,6 +1,9 @@
 package types
 
-import "database/sql/driver"
+import (
+	"database/sql"
+	"database/sql/driver"
+)
 
 /*
 Type declarations here are grouped so various flavours
@@ -34,7 +37,8 @@ type (
 				Lol bool
 			}
 		}
-		Hash ShaDigest
+		Hash   ShaDigest
+		Extern sql.NullString
 	}
 )
 
