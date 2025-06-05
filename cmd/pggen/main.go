@@ -492,9 +492,7 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 					), sliceLen)),
 			),
 			g.Stmt(g.FuncCall("copy")(
-				g.Slice2(place, 0, int(v.Len())), sliceAsArray,
-			)),
-		)
+				g.Slice2(place, 0, int(v.Len())), sliceAsArray)))
 	case *types.Named:
 		var pkg = g.makepkg(v.Obj().Pkg().Path())
 		if pkg.isGenerated {
@@ -917,6 +915,7 @@ func (g *generatorState) typeNeedsIterator() iter.Seq2[*types.Package, map[strin
 			}
 			g.typeNeeds = a
 			a = b
+			b = g.typeNeeds
 		}
 	}
 }
@@ -985,6 +984,7 @@ func (g *generatorState) queueAnonStructForScanner(obj *types.Struct, typenamele
 	})
 }
 func (g *generatorState) queueObjForScanner(obj types.Object) {
+	g.logger.Debug("queueing type for scanner generation", "name", obj.Name(), "package", obj.Pkg().Path())
 	var old = g.seenTypes.getFromSeenMap(obj.Pkg(), obj)
 	if old.scanner {
 		return
@@ -1288,6 +1288,7 @@ func (g *generatorState) generateScanForAnonStruct(
 func (g *generatorState) generateScanForType(t types.Type, name string, prologue []ast.Stmt) error {
 	switch v := t.(type) {
 	case *types.Slice:
+		g.logger.Info("generating slice scanner", "name", name)
 		// TODO: check if the generated slice parser actually works
 		var checkSrc = g.If(g.Or(
 			g.Neq(g.IndexInt(g.I("sourceBytes"), 0), g.AsLitChar("(")),
@@ -1351,14 +1352,8 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 			g.AsLitInt(0))),
 		g.ErrNotNil,
 	)(g.ReturnErr))
-	var scannerprologue = []ast.Stmt{
-		declVars, ifNotOkRet, ifNotQuote,
-		g.VarDeclInit("sourceBytes")(g.unsafeBytesRender(g.I("source"))),
-	}
-	var valuerprologue = []ast.Stmt{
-		g.VarDeclType("b", g.ImportAndUse("strings", "Builder")),
-		g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar("("))),
-	}
+	var scannerprologue []ast.Stmt
+	var valuerprologue []ast.Stmt
 
 	var needsMap map[string]needs
 	for g.nowPkg, needsMap = range g.typeNeedsIterator() {
@@ -1366,6 +1361,12 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 		for typename, need := range needsMap {
 			var typ = pkgScope.Lookup(typename)
 			if need.scanner {
+				if scannerprologue == nil {
+					scannerprologue = []ast.Stmt{
+						declVars, ifNotOkRet, ifNotQuote,
+						g.VarDeclInit("sourceBytes")(g.unsafeBytesRender(g.I("source"))),
+					}
+				}
 				if err = g.generateScanForType(
 					typ.(*types.TypeName).Type().Underlying(),
 					typename, scannerprologue,
@@ -1374,6 +1375,12 @@ func (g *generatorState) ParseModuleAndGenerate(f TypecheckingFlags, ppath strin
 				}
 			}
 			if need.valuer {
+				if valuerprologue == nil {
+					valuerprologue = []ast.Stmt{
+						g.VarDeclType("b", g.ImportAndUse("strings", "Builder")),
+						g.Stmt(g.MethodCall(g.I("b"), "WriteByte")(g.AsLitChar("("))),
+					}
+				}
 				if err = g.generateValuerForType(
 					typ.(*types.TypeName).Type().Underlying(),
 					typename, valuerprologue,
@@ -1581,7 +1588,25 @@ func (g *generatorState) processSingleGoListPackage(f TypecheckingFlags, p *json
 	return nil
 }
 
-// TODO: deduce the output file from the passed packages;
+var loglevel slog.LevelVar
+
+func setLogLevel() {
+	switch v := os.Getenv("log_level"); v {
+	case "":
+		fallthrough
+	case "info":
+		loglevel.Set(slog.LevelInfo)
+	case "debug":
+		loglevel.Set(slog.LevelDebug)
+	case "error":
+		loglevel.Set(slog.LevelError)
+	case "warn":
+		loglevel.Set(slog.LevelWarn)
+	default:
+		panic(fmt.Errorf(`should be one of "info", "debug", "error" or "warn", got %q`, v))
+	}
+}
+
 // TODO: have a mechanism to compile several packages at the same time.
 // TODO: have a mechanism to regenerate things into existing files.
 //
@@ -1601,10 +1626,13 @@ func main() {
 	g.seenTypes = make(typeNeedsMap)
 	g.pkgs = make(map[string]*Package)
 	g.fset = fset
-	g.logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{}))
+	setLogLevel()
+	g.logger = *slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		Level: &loglevel,
+	}))
 	pggen.InitAstAcc(&g.AstAcc)
+	// os.Args = []string{"urmom", "git.apsolutions.ru/aps/Internal/streaming-platform/source-code/libs/pg-composite-parser-gen.git/example/types"}
 	var pathname = os.Args[1]
-	// var pathname = "git.apsolutions.ru/aps/Internal/streaming-platform/source-code/libs/pg-composite-parser-gen.git/example/types"
 	var err error
 
 	var dsd = g.makepkg("database/sql/driver")

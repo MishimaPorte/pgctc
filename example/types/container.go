@@ -12,10 +12,12 @@ of one type could share docstrings.
 A dognail, but a non-shitty one.
 */
 type (
-	//#[generate(Scanner)]
 	Things []string
 	//#[generate(Scanner)]
-	//#[generate(Valuer)]
+	Keks []Kek
+	Kek  struct {
+		NamedSlice NamedSlice
+	}
 	Option struct {
 		Type     string
 		A        int
@@ -41,6 +43,9 @@ type (
 		Extern sql.NullString
 	}
 )
+
+// #[generate(Scanner)]
+type NamedSlice []string
 
 func (s ShaDigest) Scan(thing any) (err error) {
 	return nil
