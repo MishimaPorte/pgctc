@@ -3,11 +3,12 @@ package types
 import (
 	"fmt"
 	"unsafe"
+	"strings"
+	"strconv"
 	"database/sql/driver"
 	"bytes"
 	"time"
 	"encoding/hex"
-	"strconv"
 )
 
 func (v *Keks) Scan(thing any) (err error) {
@@ -33,9 +34,7 @@ func (v *Keks) Scan(thing any) (err error) {
 			var sourceLen = len(next)
 			cur = cur + n + 1
 			for cur := 1; cur < sourceLen-1; {
-				*v = append(*v, Kek(struct {
-					NamedSlice NamedSlice ""
-				}{}))
+				*v = append(*v, Kek{})
 				if next, n, e := __intrinsic_readString(unsafe.Slice(unsafe.StringData(next), len(next))[cur:], ')'); n == 0 {
 				} else if e != nil {
 					return e
@@ -51,6 +50,55 @@ func (v *Keks) Scan(thing any) (err error) {
 	}
 	_ = cur
 	return nil
+}
+func (v *Kek) Value() (t driver.Value, err error) {
+	var b strings.Builder
+	b.WriteByte('(')
+	var value string
+	{
+		var value, err = v.NamedSlice.Value()
+		if err != nil {
+			return nil, err
+		}
+		value = __intrinsic_computeStringFromDriverValuer(value)
+	}
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var receivedPod string
+		v.MyPod1.ToPOD(&receivedPod)
+		value = strconv.Quote(receivedPod)
+	}
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var receivedPod = v.MyPod2.ToPOD()
+		value = strconv.Quote(receivedPod)
+	}
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var receivedPod, err = v.MyPod3.ToPOD()
+		if err != nil {
+			return nil, err
+		}
+		value = strconv.Quote(receivedPod)
+	}
+	b.WriteString(value)
+	b.WriteByte(',')
+	{
+		var receivedPod string
+		if err = v.MyPod4.ToPOD(&receivedPod); err != nil {
+			return nil, err
+		}
+		value = strconv.Quote(receivedPod)
+	}
+	b.WriteString(value)
+	b.WriteByte(')')
+	return b.String(), nil
+}
+func (v *NamedSlice) Value() (t driver.Value, err error) {
+	panic("The slice conversion is not implemented yet.")
 }
 func (v *Kek) Scan(thing any) (err error) {
 	var source, ok = thing.(string)
@@ -75,6 +123,90 @@ func (v *Kek) Scan(thing any) (err error) {
 		if e := v.NamedSlice.Scan(next); e != nil {
 			return e
 		}
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.MyPod1.Scan(next); e != nil {
+			return e
+		}
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.MyPod2.Scan(next); e != nil {
+			return e
+		}
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.MyPod3.Scan(next); e != nil {
+			return e
+		}
+	}
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); n == 0 {
+	} else if e != nil {
+		return e
+	} else {
+		cur = cur + n
+		if e := v.MyPod4.Scan(next); e != nil {
+			return e
+		}
+	}
+	_ = cur
+	return nil
+}
+func (v *MyPod2) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.bigThing = next
+	}
+	_ = cur
+	return nil
+}
+func (v *MyPod4) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.bigThing = next
 	}
 	_ = cur
 	return nil
@@ -112,6 +244,54 @@ func (v *NamedSlice) Scan(thing any) (err error) {
 				cur = cur + 1
 			}
 		}
+	}
+	_ = cur
+	return nil
+}
+func (v *MyPod1) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.bigThing = next
+	}
+	_ = cur
+	return nil
+}
+func (v *MyPod3) Scan(thing any) (err error) {
+	var source, ok = thing.(string)
+	if !ok {
+		return fmt.Errorf("incompatible type: %+v", thing)
+	}
+	if source[0] == '"' {
+		if source, _, err = __intrinsic_readString(unsafe.Slice(unsafe.StringData(source), len(source))[1:], 0); err != nil {
+			return err
+		}
+	}
+	var sourceBytes = unsafe.Slice(unsafe.StringData(source), len(source))
+	if sourceBytes[0] != '(' || sourceBytes[len(source)-1] != ')' {
+		return fmt.Errorf("bad source string: %q", source)
+	}
+	var cur = 1
+	if next, n, e := __intrinsic_readString(sourceBytes[cur:], ')'); e != nil {
+		return e
+	} else {
+		cur = cur + n
+		v.bigThing = next
 	}
 	_ = cur
 	return nil

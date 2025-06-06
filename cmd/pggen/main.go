@@ -307,6 +307,7 @@ var (
 					types.NewVar(token.NoPos, nil, "err", types.Universe.Lookup("error").Type())), false),
 		)}, nil).Complete()
 	valuerIface *types.Interface
+	errIface    = types.Universe.Lookup("error").Type().Underlying().(*types.Interface)
 )
 
 func impl(t types.Type, i *types.Interface) bool {
@@ -375,7 +376,7 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 	case *types.Array:
 		return g.renderValuerRangeable(v.Elem(), parent, what, where)
 	case *types.Named:
-		return g.handleNamedValuer(v, what, where)
+		return g.handleNamedValuer(v, parent, what, where)
 	case *types.Basic:
 		return g.renderValuerBasic(v, what, where)
 	case *types.Alias:
@@ -411,14 +412,93 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 	panic("unreachable")
 }
 
-func (g *generatorState) handleNamedValuer(v *types.Named, what ast.Expr, where ast.Expr) ast.Stmt {
+// The function types supported are:
+// - [x] func (out *T)
+// - [ ] func (out *T) error
+// - [ ] func () T
+// - [x] func () T, error
+//
+// where T is the actual type that gets processed and to the database.
+func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *types.Func, what ast.Expr, where ast.Expr) ast.Stmt {
+	var sig = meth.Signature()
+	var res = sig.Results()
+	var params = sig.Params()
+
+	var pod *types.Var
+	var errLoc *types.Var
+
+	var stmts []ast.Stmt
+	switch res.Len() {
+	case 0:
+		if params.Len() != 1 {
+			panic("bad argument count for ToPOD method")
+		}
+		pod = params.At(0)
+		var podElem = pod.Type().(*types.Pointer).Elem()
+		stmts = append(stmts,
+			g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem)),
+			g.Stmt(g.MethodCall(what, "ToPOD")(g.Reference(g.I("receivedPod")))),
+			g.renderValuer(podElem, parent, g.I("receivedPod"), where))
+	case 1:
+		switch params.Len() {
+		case 0:
+			pod = res.At(0)
+			stmts = append(stmts,
+				g.VarDeclInit("receivedPod")(g.MethodCall(what, "ToPOD")()),
+				g.renderValuer(pod.Type(), parent, g.I("receivedPod"), where))
+		case 1:
+			pod = params.At(0)
+			errLoc = res.At(0)
+			if !impl(errLoc.Type(), errIface) {
+				panic("the second return value for the ToPOD method shall be an error")
+			}
+			var podElem = pod.Type().(*types.Pointer).Elem()
+			stmts = append(stmts,
+				g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem)),
+				g.If2(
+					g.Assign(g.Err)(
+						g.MethodCall(what, "ToPOD")(
+							g.Reference(g.I("receivedPod")))),
+					g.Neq(g.Err, g.Nil),
+				)(g.Return(g.Nil, g.Err)),
+				g.renderValuer(podElem, parent, g.I("receivedPod"), where))
+		}
+	case 2:
+		if params.Len() != 0 {
+			panic("bad argument count for ToPOD method")
+		}
+		pod = res.At(0)
+		errLoc = res.At(1)
+		if !impl(errLoc.Type(), errIface) {
+			panic("the second return value for the ToPOD method shall be an error")
+		}
+		stmts = append(stmts,
+			g.VarDeclInit("receivedPod", "err")(
+				g.MethodCall(what, "ToPOD")()),
+			g.If(
+				g.Neq(g.Err, g.Nil),
+			)(g.Return(g.Nil, g.Err)),
+			g.renderValuer(pod.Type(), parent, g.I("receivedPod"), where))
+	default:
+		panic("bad results count for ToPOD method")
+	}
+
+	return g.Block(stmts...)
+}
+func (g *generatorState) handleNamedValuer(v *types.Named, parent string, what ast.Expr, where ast.Expr) ast.Stmt {
+	// The ToPOD method takes precedence
+	var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "ToPOD")
+	if method != nil {
+		return g.handleToPODMethod(v, parent, method.(*types.Func), what, where)
+	}
+
 	var pkg = g.makepkg(v.Obj().Pkg().Path())
 	if pkg.isGenerated {
 		// For packages that we do actually care about we may generate
 		// a scanner implementation ourselves; we queue for generation (if needed)
 		// and then just generate the call
 		if impl(v, valuerIface) {
-			var method, _, _ = types.LookupFieldOrMethod(v, false, v.Obj().Pkg(), "Value")
+			var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "Value")
 			if method != nil {
 				var file = g.fset.File(method.Pos())
 				if !strings.HasSuffix(file.Name(), "zz_scannervaluer.generated.go") {
@@ -521,7 +601,25 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 	case *types.Alias:
 		return g.renderScanner(v.Underlying(), namelet, place, from)
 	case *types.Map:
-		panic("TODO: implement maps as an array of two-field structs: key and value")
+		var stru = types.NewStruct(
+			[]*types.Var{
+				types.NewVar(0, g.nowPkg, "Key", v.Key()),
+				types.NewVar(0, g.nowPkg, "Value", v.Elem())},
+			nil)
+		var declarePlace = g.VarDeclType(
+			"actualSlice", g.SliceType(g.ValueTypeExpr(stru)))
+		var sliceScanner = g.renderSliceScannerFor(g.I("actualSlice"), from, namelet, stru)
+		var makeMap = g.Assign(place)(g.Make2(g.ValueTypeExpr(v), g.Len(g.I("actualSlice"))))
+		var populateMap = g.RangeDef(g.I("i"), g.I("actualSlice"))(
+			g.Assign(
+				g.Index(place, g.Selector(g.Index(g.I("actualSlice"), g.I("i")), "Key")),
+			)(g.Selector(g.Index(g.I("actualSlice"), g.I("i")), "Value")),
+		)
+		return g.Block(
+			declarePlace,
+			sliceScanner,
+			makeMap,
+			populateMap)
 	case *types.Struct:
 		g.logger.Info("doing anon struct", "parentName", namelet)
 		g.queueAnonStructForScanner(v, namelet)
@@ -704,7 +802,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, parentName 
 	return g.Block(
 		g.Assign(
 			place)(
-			g.Make2(
+			g.MakeSlice2(
 				g.ValueTypeExpr(elem),
 				g.AsLitInt(0))),
 		g.If3(

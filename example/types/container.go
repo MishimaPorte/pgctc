@@ -12,12 +12,30 @@ of one type could share docstrings.
 A dognail, but a non-shitty one.
 */
 type (
+	MyPod1 struct {
+		bigThing string
+	}
+	MyPod2 struct {
+		bigThing string
+	}
+	MyPod3 struct {
+		bigThing string
+	}
+	MyPod4 struct {
+		bigThing string
+	}
 	Things []string
 	//#[generate(Scanner)]
 	Keks []Kek
-	Kek  struct {
+	//#[generate(Valuer)]
+	Kek struct {
 		NamedSlice NamedSlice
+		MyPod1     MyPod1
+		MyPod2     MyPod2
+		MyPod3     MyPod3
+		MyPod4     MyPod4
 	}
+
 	Option struct {
 		Type     string
 		A        int
@@ -43,6 +61,20 @@ type (
 		Extern sql.NullString
 	}
 )
+
+func (s *MyPod1) ToPOD(out *string) {
+	*out = "kke"
+}
+func (s *MyPod2) ToPOD() string {
+	return "kke"
+}
+func (s *MyPod3) ToPOD() (string, error) {
+	return "kke", nil
+}
+func (s *MyPod4) ToPOD(out *string) error {
+	*out = "kke"
+	return nil
+}
 
 // #[generate(Scanner)]
 type NamedSlice []string

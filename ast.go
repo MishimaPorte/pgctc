@@ -286,10 +286,13 @@ func (a *AstAcc) New(x ast.Expr) *ast.CallExpr {
 func (a *AstAcc) Len(e ast.Expr) *ast.CallExpr {
 	return a.FuncCall("len")(e)
 }
-func (a *AstAcc) Make2(elem, length ast.Expr) *ast.CallExpr {
+func (a *AstAcc) Make2(t, length ast.Expr) *ast.CallExpr {
+	return a.FuncCall("make")(t, length)
+}
+func (a *AstAcc) MakeSlice2(elem, length ast.Expr) *ast.CallExpr {
 	return a.FuncCall("make")(a.SliceType(elem), length)
 }
-func (a *AstAcc) Make3(elem, length, capacity ast.Expr) *ast.CallExpr {
+func (a *AstAcc) MakeSlice3(elem, length, capacity ast.Expr) *ast.CallExpr {
 	return a.FuncCall("make")(a.SliceType(elem), length, capacity)
 }
 func (a *AstAcc) Selector(e ast.Expr, s ...string) *ast.SelectorExpr {
@@ -465,6 +468,17 @@ func (a *AstAcc) For3(init, post ast.Stmt, cond ast.Expr) func(...ast.Stmt) *ast
 	fors.Post = post
 	fors.Cond = cond
 	return func(s ...ast.Stmt) *ast.ForStmt {
+		fors.Body = Alloc[ast.BlockStmt](&a.a)
+		fors.Body.List = Clone(&a.a, s).Slice()
+		return fors
+	}
+}
+func (a *AstAcc) RangeDef(k, val ast.Expr) func(...ast.Stmt) *ast.RangeStmt {
+	var fors = Alloc[ast.RangeStmt](&a.a)
+	fors.Key = k
+	fors.X = val
+	fors.Tok = token.DEFINE
+	return func(s ...ast.Stmt) *ast.RangeStmt {
 		fors.Body = Alloc[ast.BlockStmt](&a.a)
 		fors.Body.List = Clone(&a.a, s).Slice()
 		return fors
