@@ -3,6 +3,7 @@ package types
 import (
 	"database/sql"
 	"database/sql/driver"
+	"strconv"
 )
 
 /*
@@ -31,6 +32,7 @@ type (
 	Kek struct {
 		NamedSlice NamedSlice
 		MyPod1     MyPod1
+		Nul        NullableMyPod1
 		MyPod2     MyPod2
 		MyPod3     MyPod3
 		MyPod4     MyPod4
@@ -75,12 +77,42 @@ func (s *MyPod4) ToPOD(out *string) error {
 	*out = "kke"
 	return nil
 }
-func (s *MyPod1) FromPOD(from string) error {
-	s.bigThing = from
+func (s *MyPod1) FromPOD(from int) error {
+	s.bigThing = strconv.Itoa(from)
 	return nil
 }
 func (s *MyPod2) FromPOD(from string) {
 	s.bigThing = from
+}
+
+type NullableMyPod1 struct {
+	Data  MyPod1
+	Valid bool
+}
+
+func (s *NullableMyPod1) FromPOD(from *MyPod1) {
+	if from == nil {
+		s.Valid = false
+	} else {
+		s.Valid = true
+		s.Data = *from
+	}
+}
+
+type SubMyPod1 struct {
+	m *MyPod1
+}
+
+func (s *SubMyPod1) ToPOD() *MyPod1 {
+	return s.m
+}
+
+func (s *NullableMyPod1) ToPOD() *SubMyPod1 {
+	if s.Valid {
+		return &SubMyPod1{&s.Data}
+	} else {
+		return nil
+	}
 }
 
 // #[generate(Scanner)]
