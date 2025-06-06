@@ -412,14 +412,51 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 	panic("unreachable")
 }
 
+func (g *generatorState) handleFromPODMethod(parent string, meth *types.Func, place ast.Expr, from ast.Expr) ast.Stmt {
+	var sig = meth.Signature()
+	var res = sig.Results()
+	var params = sig.Params()
+
+	var pod *types.Var
+	var errLoc *types.Var
+
+	var stmts []ast.Stmt
+	switch res.Len() {
+	case 0:
+		if params.Len() != 1 {
+			panic("bad argument count for ToPOD method")
+		}
+		pod = params.At(0)
+		var podElem = pod.Type().(*types.Pointer).Elem()
+		stmts = append(stmts,
+			g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem)),
+			g.Stmt(g.MethodCall(place, "ToPOD")(g.Reference(g.I("receivedPod")))),
+			g.renderValuer(podElem, parent, g.I("receivedPod"), from))
+	case 1:
+		if params.Len() != 1 {
+			panic("FromPOD should have at least one argument")
+		}
+		pod = params.At(0)
+		errLoc = res.At(0)
+		stmts = append(stmts,
+			g.VarDeclType("datum", g.ValueTypeExpr(pod.Type())),
+			g.renderScanner(pod.Type(), parent, g.I("datum"), from),
+			g.Stmt(g.MethodCall(place, "FromPOD")(g.I("datum"))))
+	default:
+		panic("bad results count for FromPOD method")
+	}
+
+	return g.Block(stmts...)
+}
+
 // The function types supported are:
 // - [x] func (out *T)
-// - [ ] func (out *T) error
-// - [ ] func () T
+// - [x] func (out *T) error
+// - [x] func () T
 // - [x] func () T, error
 //
 // where T is the actual type that gets processed and to the database.
-func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *types.Func, what ast.Expr, where ast.Expr) ast.Stmt {
+func (g *generatorState) handleToPODMethod(parent string, meth *types.Func, what ast.Expr, where ast.Expr) ast.Stmt {
 	var sig = meth.Signature()
 	var res = sig.Results()
 	var params = sig.Params()
@@ -489,7 +526,7 @@ func (g *generatorState) handleNamedValuer(v *types.Named, parent string, what a
 	// The ToPOD method takes precedence
 	var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "ToPOD")
 	if method != nil {
-		return g.handleToPODMethod(v, parent, method.(*types.Func), what, where)
+		return g.handleToPODMethod(parent, method.(*types.Func), what, where)
 	}
 
 	var pkg = g.makepkg(v.Obj().Pkg().Path())

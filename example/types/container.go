@@ -75,6 +75,13 @@ func (s *MyPod4) ToPOD(out *string) error {
 	*out = "kke"
 	return nil
 }
+func (s *MyPod1) FromPOD(from string) error {
+	s.bigThing = from
+	return nil
+}
+func (s *MyPod2) FromPOD(from string) {
+	s.bigThing = from
+}
 
 // #[generate(Scanner)]
 type NamedSlice []string
