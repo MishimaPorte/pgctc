@@ -436,7 +436,7 @@ func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *
 		pod = params.At(0)
 		var podElem = pod.Type().(*types.Pointer).Elem()
 		stmts = append(stmts,
-			g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem)),
+			g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem, g.nowPkg)),
 			g.Stmt(g.MethodCall(what, "ToPOD")(g.Reference(g.I("receivedPod")))),
 			g.renderValuer(podElem, parent, g.I("receivedPod"), where))
 	case 1:
@@ -454,7 +454,7 @@ func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *
 			}
 			var podElem = pod.Type().(*types.Pointer).Elem()
 			stmts = append(stmts,
-				g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem)),
+				g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem, g.nowPkg)),
 				g.If2(
 					g.Assign(g.Err)(
 						g.MethodCall(what, "ToPOD")(
@@ -551,7 +551,7 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 		//       That is postgres nulls should just translate into a nil here.
 		//       I dont know.
 		return g.Block(
-			g.Assign(place)(g.New(g.ValueTypeExpr(v.Elem()))),
+			g.Assign(place)(g.New(g.ValueTypeExpr(v.Elem(), g.nowPkg))),
 			g.renderScanner(v.Elem(), namelet, g.Star(place), from),
 		)
 	case *types.Slice:
@@ -563,7 +563,7 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 		var sliceAsArray = g.I("sliceAsArray")
 		var sliceLen = g.Len(sliceAsArray)
 		return g.Block(
-			g.VarDecl2(g.ValueSpec("sliceAsArray")(g.SliceType(g.ValueTypeExpr(v.Elem())))),
+			g.VarDecl2(g.ValueSpec("sliceAsArray")(g.SliceType(g.ValueTypeExpr(v.Elem(), g.nowPkg)))),
 			g.renderSliceScannerFor(sliceAsArray, from, namelet, v.Elem()),
 			g.If(g.Neq(sliceLen, arrLen))(
 				g.Return(
@@ -607,9 +607,9 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 				types.NewVar(0, g.nowPkg, "Value", v.Elem())},
 			nil)
 		var declarePlace = g.VarDeclType(
-			"actualSlice", g.SliceType(g.ValueTypeExpr(stru)))
+			"actualSlice", g.SliceType(g.ValueTypeExpr(stru, g.nowPkg)))
 		var sliceScanner = g.renderSliceScannerFor(g.I("actualSlice"), from, namelet, stru)
-		var makeMap = g.Assign(place)(g.Make2(g.ValueTypeExpr(v), g.Len(g.I("actualSlice"))))
+		var makeMap = g.Assign(place)(g.Make2(g.ValueTypeExpr(v, g.nowPkg), g.Len(g.I("actualSlice"))))
 		var populateMap = g.RangeDef(g.I("i"), g.I("actualSlice"))(
 			g.Assign(
 				g.Index(place, g.Selector(g.Index(g.I("actualSlice"), g.I("i")), "Key")),
@@ -803,7 +803,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, parentName 
 		g.Assign(
 			place)(
 			g.MakeSlice2(
-				g.ValueTypeExpr(elem),
+				g.ValueTypeExpr(elem, g.nowPkg),
 				g.AsLitInt(0))),
 		g.If3(
 			g.AssignStmt("next", "n", "e")(
@@ -824,7 +824,7 @@ func (g *generatorState) renderSliceScannerFor(place, from ast.Expr, parentName 
 				g.AssignStmt("cur")(g.AsLitInt(1)),
 				g.Lt(g.I("cur"), g.SubConst(g.I("sourceLen"), 1)),
 			)(
-				g.Append(place, g.ZeroValue(elem)),
+				g.Append(place, g.ZeroValue(elem, g.nowPkg)),
 				g.renderScanner(
 					elem, parentName,
 					g.Index(place, g.SubConst(g.Len(place), 1)),
@@ -1306,7 +1306,7 @@ func (g *generatorState) typecheck(pkg *Package) error {
 func (g *generatorState) generateValuerForAnonStruct(t *types.Struct, namelet string, prologue []ast.Stmt) error {
 	var body = g.createValuerBodyStruct(prologue, namelet, g.I("place"), t)
 	g.CreateFunc("__Value_"+namelet)(
-		g.Param("place", g.Star(g.ValueTypeExpr(t))),
+		g.Param("place", g.Star(g.ValueTypeExpr(t, g.nowPkg))),
 	)(
 		g.Param("t", g.ImportAndUse2("database/sql/driver", "driver", "Value")),
 		g.Param("err", g.I("error")),
@@ -1378,7 +1378,7 @@ func (g *generatorState) generateScanForAnonStruct(
 		return err
 	}
 	g.CreateFunc("__Scan_"+typeNamelet)(
-		g.Param("place", g.Star(g.ValueTypeExpr(t))),
+		g.Param("place", g.Star(g.ValueTypeExpr(t, g.nowPkg))),
 		g.Param("thing", g.Any),
 	)(g.Param("err", g.I("error")))(body...)
 	return nil
@@ -1740,130 +1740,5 @@ func main() {
 	valuerIface = dsd.Types.Scope().Lookup("Valuer").Type().(*types.Named).Underlying().(*types.Interface)
 	if err = g.ParseModuleAndGenerate(TypecheckingFlags{false}, pathname); err != nil {
 		panic(err.Error())
-	}
-}
-
-/*
-go/types package integration layer with go/ast package.
-Various functions to interact with/genererate AST for types.
-*/
-
-// returns a provided type as an ast.Expr usable, e.g., in a new, make, etc call.
-// some heuristic is used here
-func (g *generatorState) ValueTypeExpr(typ types.Type) ast.Expr {
-	switch v := typ.(type) {
-	case *types.Alias:
-		return g.I(v.Obj().Name())
-	case *types.Array:
-		return g.ArrayType(g.ValueTypeExpr(v.Elem()), int(v.Len()))
-	case *types.Basic:
-		switch v.Kind() {
-		case types.UntypedString:
-			return g.String
-		case types.Bool, types.UntypedBool:
-			return g.Bool
-		case types.Complex128, types.UntypedComplex:
-			return g.Complex128
-		case types.Complex64:
-			return g.Complex64
-		case types.Float32:
-			return g.Float32
-		case types.Float64, types.UntypedFloat:
-			return g.Float64
-		case types.Int, types.UntypedInt:
-			return g.Int
-		case types.Int16:
-			return g.Int16
-		case types.Int32, types.UntypedRune:
-			return g.Int32
-		case types.Int64:
-			return g.Int64
-		case types.Int8:
-			return g.Int8
-		case types.String:
-			return g.String
-		case types.Uint:
-			return g.Uint
-		case types.Uint8:
-			return g.Uint8
-		case types.Uint16:
-			return g.Uint16
-		case types.Uint32:
-			return g.Uint32
-		case types.Uint64:
-			return g.Uint64
-		case types.Uintptr:
-			return g.Uintptr
-		}
-	case *types.Map:
-		return g.MapType(g.ValueTypeExpr(v.Key()), g.ValueTypeExpr(v.Elem()))
-	case *types.Named:
-		var pkg = v.Obj().Pkg()
-		if pkg == g.nowPkg {
-			return g.I(v.Obj().Name())
-		} else {
-			return g.Selector(g.I(v.Obj().Pkg().Name()), v.Obj().Name())
-		}
-	case *types.Pointer:
-		return g.Star(g.ValueTypeExpr(v.Elem()))
-	case *types.Slice:
-		return g.SliceType(g.ValueTypeExpr(v.Elem()))
-	case *types.Struct:
-		var fields = make([]*ast.Field, v.NumFields())
-		var counter = 0
-		for i := range v.Fields() {
-			fields[counter] = g.Field(i.Name(), v.Tag(counter), g.ValueTypeExpr(i.Type()))
-			counter++
-		}
-		return g.StructType(fields...)
-	}
-	panic(fmt.Sprintf("unreachable: unexpected types.Type: %#v", typ))
-}
-
-// renders a zero value expression literal for a given type.
-func (g *generatorState) ZeroValue(typ types.Type) ast.Expr {
-	switch v := typ.(type) {
-	case *types.Alias:
-		return g.ZeroValue(v.Origin())
-	case *types.Basic:
-		switch v.Kind() {
-		case types.UntypedString, types.String:
-			return g.EmptyString
-		case types.Bool, types.UntypedBool:
-			return g.False
-		case types.Complex64, types.Complex128, types.UntypedComplex:
-			return g.Cast(g.Complex(0, 0), g.ValueTypeExpr(v))
-		case types.Float32, types.Float64, types.UntypedFloat:
-			return g.Cast(g.AsFloatLit(0), g.ValueTypeExpr(v))
-		case types.Int, types.UntypedInt, types.Int16,
-			types.Int32, types.UntypedRune, types.Int64,
-			types.Int8, types.Uint, types.Uint8,
-			types.Uint16, types.Uint32, types.Uint64,
-			types.Uintptr:
-			return g.Cast(g.AsLitInt(0), g.ValueTypeExpr(v))
-		case types.UnsafePointer:
-			return g.Cast(g.Cast(g.AsLitInt(0), g.Uintptr), g.Selector(g.I("unsafe"), "Pointer"))
-		default:
-			panic("unreachable")
-		}
-	case *types.Named:
-		var pkg = v.Obj().Pkg()
-		if pkg != g.nowPkg {
-			g.AstAcc.Import(pkg.Path())
-		}
-		switch v.Underlying().(type) {
-		case *types.Struct, *types.Array:
-			return g.CompositeLiteral(g.I(v.Obj().Name()))()
-		default:
-			return g.Cast(g.ZeroValue(v.Underlying()), g.ValueTypeExpr(v))
-		}
-	case *types.Chan, *types.Interface,
-		*types.Map, *types.Pointer, *types.Signature,
-		*types.Slice:
-		return g.Nil
-	case *types.Struct, *types.Array:
-		return g.CompositeLiteral(g.ValueTypeExpr(v))()
-	default:
-		panic(fmt.Sprintf("unexpected types.Type: %#v", v))
 	}
 }

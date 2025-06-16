@@ -1,10 +1,15 @@
 package pggen
 
 import (
+	"fmt"
 	"go/ast"
 	"go/token"
+	"go/types"
+	"io"
 	"slices"
 	"strconv"
+	"sync"
+	"unsafe"
 )
 
 // A table of frequently-used identifiers and other ast nodes.
@@ -73,9 +78,10 @@ func InitAstAcc(a *AstAcc) {
 type AstAcc struct {
 	a Arena
 
-	funcs   []*ast.FuncDecl
-	imports []string
-	file    *ast.File
+	funcs    []*ast.FuncDecl
+	genDecls []*ast.GenDecl
+	imports  []string
+	file     *ast.File
 
 	Freqtable
 }
@@ -87,7 +93,9 @@ func (a *AstAcc) Field(name, tag string, t ast.Expr) *ast.Field {
 	*nameIPtr = nameI
 	ret.Names = AsSlice(nameIPtr)
 	ret.Type = t
-	ret.Tag = a.AsLit(tag)
+	if tag != "" {
+		ret.Tag = a.AsLit(tag)
+	}
 	return ret
 }
 func (a *AstAcc) StructType(fields ...*ast.Field) *ast.StructType {
@@ -159,7 +167,8 @@ func (a *AstAcc) AsFile(packageName string) *ast.File {
 		a.file = Alloc[ast.File](&a.a)
 		a.file.Name = a.I(packageName)
 	}
-	var decls = Allocn[ast.Decl](&a.a, uintptr(len(a.funcs)+1))
+	var decls = Allocn[ast.Decl](&a.a,
+		uintptr(len(a.genDecls)+len(a.funcs)+1))
 	var decl = Alloc[ast.GenDecl](&a.a)
 	decl.Tok = token.IMPORT
 	// This abhorrent shit is needed to make format.Node sort imports.
@@ -180,8 +189,11 @@ func (a *AstAcc) AsFile(packageName string) *ast.File {
 		*specs.RefAt(i) = impSpecs.RefAt(i)
 	}
 	a.file.Imports = impSpecPtrs.Slice()
-	for i, fuc := range a.funcs {
-		*decls.RefAt(i + 1) = fuc
+	for i := range a.funcs {
+		*decls.RefAt(i + 1) = a.funcs[i]
+	}
+	for i := range a.genDecls {
+		*decls.RefAt(i + len(a.funcs) + 1) = a.genDecls[i]
 	}
 	a.file.Decls = decls.Slice()
 	return a.file
@@ -731,6 +743,44 @@ func (a *AstAcc) Import(pname string) {
 	}
 }
 
+type TypeNode interface {
+	~*ast.Ident |
+		~*ast.ParenExpr |
+		~*ast.SelectorExpr |
+		~*ast.StarExpr |
+		~*ast.ArrayType |
+		~*ast.StructType |
+		~*ast.FuncType |
+		~*ast.InterfaceType |
+		~*ast.MapType |
+		~*ast.ChanType
+}
+
+func (a *AstAcc) Struct(fields ...*ast.Field) *ast.StructType {
+	var fieldList = Alloc[ast.FieldList](&a.a)
+	fieldList.List = Clone(&a.a, fields).Slice()
+	var stru = Alloc[ast.StructType](&a.a)
+	stru.Fields = fieldList
+	return stru
+}
+
+func DeclType[T TypeNode](a *AstAcc, name string, typenode T) *ast.GenDecl {
+	var spec = Alloc[ast.TypeSpec](&a.a)
+	spec.Name = a.I(name)
+	spec.Type = ast.Expr(typenode)
+
+	var specs = Alloc[ast.Spec](&a.a)
+	*specs = spec
+
+	var genDecl = Alloc[ast.GenDecl](&a.a)
+	genDecl.Tok = token.TYPE
+	genDecl.Specs = AsSlice(specs)
+
+	a.genDecls = append(a.genDecls, genDecl)
+
+	return genDecl
+}
+
 func (a *AstAcc) CreateFunc(
 	name string,
 ) func(
@@ -846,5 +896,342 @@ func (a *AstAcc) IntFromString(s string) ast.Expr {
 		return a.Uintptr
 	default:
 		panic("bad int in IntFromString")
+	}
+}
+
+// This type represents an ARENA. It is used to store things
+// bound by the same lifetime and freeing it at all at once. E.g. a single plugin
+// execution or something.
+//
+// Arena can only hold pointer into the memory owned either by static go memory
+// or by the Arena itself - GC assumes that only death lies here.
+type Arena struct {
+	// now-used chunk (for object and slice alloc)
+	data      uintptr
+	cap, used uintptr
+
+	chunks []SizedSpan[byte, uintptr]
+}
+
+// This should be some other data structure, honestly, since
+// we want to group chunks by size, etc to get better results.
+// also we probably dont want to trash allocations as aggressively as
+// sync.Pool does.
+var chunkFreeList sync.Pool
+
+type chunk struct {
+	ptr unsafe.Pointer
+	cap uintptr
+}
+
+const n = 4096 * 4
+
+func (a *Arena) ReadAllFrom(r io.Reader) (Span[byte], error) {
+	var b = Allocn[byte](a, 512)
+	var bLen = 0
+	for {
+		var n, err = r.Read(b.Slice()[bLen:b.Length])
+		bLen += n
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+			}
+			return b, err
+		}
+
+		if bLen == b.Length {
+			b = Realloc(a, b, uintptr(b.Length*2))
+		}
+	}
+}
+
+// safety: there should be no alloc/allocn/realloc (for other allocations) calls
+// between a call for allocn/realloc and realloc for a given allocation.
+// That is, a reallocation may happen only if the allocation happened last for a given arena.
+func Realloc[T any](a *Arena, old Span[T], n uintptr) Span[T] {
+	if old.Length == 0 {
+		return Allocn[T](a, n)
+	}
+	var oldPlace = uintptr(unsafe.Pointer(old.Items))
+	// check if it is the last in the allocation
+	var t T
+	var elemSize = unsafe.Sizeof(t) &^ (unsafe.Alignof(t) - 1)
+	if a.data+(a.used-(uintptr(old.Length)*elemSize)) != oldPlace {
+		panic("bad realloc: realloc is called on an arena after something were allocated in between calls to allocn/realloc")
+	}
+	// we conceptually free the contents of the current chunk and then
+	// reallocate them. if we get reallocated into some other chunk, we
+	// perform a copy.
+	a.used -= uintptr(old.Length * int(elemSize))
+	var ret = Allocn[T](a, n)
+	if oldPlace != uintptr(unsafe.Pointer(ret.Items)) {
+		copy(ret.Slice(), old.Slice())
+	}
+	return ret
+}
+
+// clones the s string into the arena and returns a string that points
+// into the arena-allocated string.
+func (a *Arena) Strclone(s string) string {
+	var bytes = Allocn[byte](a, uintptr(len(s)))
+	copy(bytes.Slice(), s)
+	return unsafe.String(bytes.Items, bytes.Length)
+}
+
+func Clone[T any](a *Arena, src []T) Span[T] {
+	var res = Allocn[T](a, uintptr(len(src)))
+	copy(res.Slice(), src)
+	return res
+}
+
+// Maybe make this return a special thing, pointing to a special-cased chunk?
+func Allocn[T any](a *Arena, n uintptr) Span[T] {
+	var t T
+	var elemSize = unsafe.Sizeof(t) &^ (unsafe.Alignof(t) - 1)
+	var data = (*T)(unsafe.Pointer(a.allocSize(elemSize * n)))
+	return Span[T]{data, int(n)}
+}
+func Alloc[T any](a *Arena) *T {
+	var t T
+	return (*T)(unsafe.Pointer(a.allocSize(unsafe.Sizeof(t))))
+}
+func (a *Arena) Free() {
+	for _, ch := range a.chunks {
+		chunkFreeList.Put(ch)
+	}
+}
+
+func (a *Arena) allocSize(size uintptr) uintptr {
+	var allocedSize = (size + 7) &^ 7
+	if a.cap == 0 || a.used > a.cap || allocedSize >= a.cap-a.used {
+		var ch = chunkFreeList.Get()
+		if ch != nil {
+			var chun = ch.(SizedSpan[byte, uintptr])
+			if chun.Length >= size {
+				a.data = uintptr(unsafe.Pointer(chun.Items))
+				a.used = 0
+				a.cap = chun.Length
+				a.chunks = append(a.chunks, chun)
+				goto Alloc
+			}
+			chunkFreeList.Put(chun)
+		}
+		// TODO: maintain a free-list of chunks to facilitate reuse.
+		var allocedSize = max(a.cap*2, allocedSize, n)
+		var ptr = unsafe.SliceData(
+			make([]byte, allocedSize),
+		)
+		a.chunks = append(a.chunks, SizedSpan[byte, uintptr]{ptr, a.cap})
+		a.data = uintptr(unsafe.Pointer(ptr))
+		a.used = 0
+		a.cap = allocedSize
+	}
+Alloc:
+	var res = a.data + a.used
+	a.used += allocedSize // alignment is always 8
+	return res
+}
+
+type anyint interface {
+	~int | ~uint | ~uintptr |
+		~int8 | ~int16 | ~int32 | ~int64 |
+		~uint8 | ~uint16 | ~uint32 | ~uint64
+}
+
+// This type is like a builtin string, but for any type.
+type SizedSpan[T any, I anyint] struct {
+	Items  *T
+	Length I
+}
+type Span[T any] = SizedSpan[T, int]
+
+func (s *SizedSpan[T, I]) FromSlice(datas []T) SizedSpan[T, I] {
+	var ss = SizedSpan[T, I]{unsafe.SliceData(datas), I(len(datas))}
+	*s = ss
+	return ss
+}
+func NewSpanDefault[T any](length int) Span[T] {
+	return Span[T]{
+		Length: length,
+		Items:  unsafe.SliceData(make([]T, length)),
+	}
+}
+func NewSpan[T any, I anyint](length I) SizedSpan[T, I] {
+	return SizedSpan[T, I]{
+		Length: length,
+		Items:  unsafe.SliceData(make([]T, length)),
+	}
+}
+func SpanFromSlice[I anyint, T any, Slice ~[]T](datas Slice) SizedSpan[T, I] {
+	var ss = SizedSpan[T, I]{unsafe.SliceData(datas), I(len(datas))}
+	return ss
+}
+func SpanContains[T comparable, I anyint](haystack SizedSpan[T, I], needle T) bool {
+	for i := range uint64(haystack.Length) {
+		if haystack.At(I(i)) == needle {
+			return true
+		}
+	}
+	return false
+}
+func (s SizedSpan[T, I]) Slice() []T {
+	return unsafe.Slice(s.Items, s.Length)
+}
+func (s SizedSpan[T, I]) At(i I) T {
+	return *(*T)(unsafe.Add(unsafe.Pointer(s.Items), unsafe.Sizeof(*s.Items)*uintptr(i)))
+}
+func (s SizedSpan[T, I]) RefAt(i I) *T {
+	return (*T)(unsafe.Add(unsafe.Pointer(s.Items), unsafe.Sizeof(*s.Items)*uintptr(i)))
+}
+
+func String(b []byte) string {
+	return unsafe.String(unsafe.SliceData(b), len(b))
+}
+
+func Bytes(s string) []byte {
+	return unsafe.Slice(unsafe.StringData(s), len(s))
+}
+
+// Transforms a slice of things of one kind to a slice of things of another kind.
+// SAFETY: T and Z should have equal gc shapes, please
+func SliceTransmute[Z, T any](items []T) []Z {
+	return unsafe.Slice(((*Z)(unsafe.Pointer(unsafe.SliceData(items)))), len(items))
+}
+
+// Transforms a pointer to a one thing to a pointer to another thing.
+//
+// SAFETY: do not do bad shit (the T and Z should have
+// equal gc shapes to not cause The Bad Thing)
+func Transmute[Z, T any](item *T) *Z {
+	return (*Z)(unsafe.Pointer(item))
+}
+
+// Transforms a pointer to an item into a slice of length one.
+func AsSlice[T any](item *T) []T {
+	return unsafe.Slice(item, 1)
+}
+
+/*
+go/types package integration layer with go/ast package.
+Various functions to interact with/genererate AST for types.
+*/
+
+// returns a provided type as an ast.Expr usable, e.g., in a new, make, etc call.
+// some heuristic is used here
+func (g *AstAcc) ValueTypeExpr(typ types.Type, thisPkg *types.Package) ast.Expr {
+	switch v := typ.(type) {
+	case *types.Alias:
+		return g.I(v.Obj().Name())
+	case *types.Array:
+		return g.ArrayType(g.ValueTypeExpr(v.Elem(), thisPkg), int(v.Len()))
+	case *types.Basic:
+		switch v.Kind() {
+		case types.UntypedString:
+			return g.String
+		case types.Bool, types.UntypedBool:
+			return g.Bool
+		case types.Complex128, types.UntypedComplex:
+			return g.Complex128
+		case types.Complex64:
+			return g.Complex64
+		case types.Float32:
+			return g.Float32
+		case types.Float64, types.UntypedFloat:
+			return g.Float64
+		case types.Int, types.UntypedInt:
+			return g.Int
+		case types.Int16:
+			return g.Int16
+		case types.Int32, types.UntypedRune:
+			return g.Int32
+		case types.Int64:
+			return g.Int64
+		case types.Int8:
+			return g.Int8
+		case types.String:
+			return g.String
+		case types.Uint:
+			return g.Uint
+		case types.Uint8:
+			return g.Uint8
+		case types.Uint16:
+			return g.Uint16
+		case types.Uint32:
+			return g.Uint32
+		case types.Uint64:
+			return g.Uint64
+		case types.Uintptr:
+			return g.Uintptr
+		}
+	case *types.Map:
+		return g.MapType(g.ValueTypeExpr(v.Key(), thisPkg), g.ValueTypeExpr(v.Elem(), thisPkg))
+	case *types.Named:
+		var pkg = v.Obj().Pkg()
+		if pkg == thisPkg {
+			return g.I(v.Obj().Name())
+		} else {
+			return g.Selector(g.I(v.Obj().Pkg().Name()), v.Obj().Name())
+		}
+	case *types.Pointer:
+		return g.Star(g.ValueTypeExpr(v.Elem(), thisPkg))
+	case *types.Slice:
+		return g.SliceType(g.ValueTypeExpr(v.Elem(), thisPkg))
+	case *types.Struct:
+		var fields = make([]*ast.Field, v.NumFields())
+		var counter = 0
+		for i := range v.Fields() {
+			fields[counter] = g.Field(i.Name(), v.Tag(counter), g.ValueTypeExpr(i.Type(), thisPkg))
+			counter++
+		}
+		return g.StructType(fields...)
+	}
+	panic(fmt.Sprintf("unreachable: unexpected types.Type: %#v", typ))
+}
+
+// renders a zero value expression literal for a given type.
+func (g *AstAcc) ZeroValue(typ types.Type, thisPkg *types.Package) ast.Expr {
+	switch v := typ.(type) {
+	case *types.Alias:
+		return g.ZeroValue(v.Origin(), thisPkg)
+	case *types.Basic:
+		switch v.Kind() {
+		case types.UntypedString, types.String:
+			return g.EmptyString
+		case types.Bool, types.UntypedBool:
+			return g.False
+		case types.Complex64, types.Complex128, types.UntypedComplex:
+			return g.Cast(g.Complex(0, 0), g.ValueTypeExpr(v, thisPkg))
+		case types.Float32, types.Float64, types.UntypedFloat:
+			return g.Cast(g.AsFloatLit(0), g.ValueTypeExpr(v, thisPkg))
+		case types.Int, types.UntypedInt, types.Int16,
+			types.Int32, types.UntypedRune, types.Int64,
+			types.Int8, types.Uint, types.Uint8,
+			types.Uint16, types.Uint32, types.Uint64,
+			types.Uintptr:
+			return g.Cast(g.AsLitInt(0), g.ValueTypeExpr(v, thisPkg))
+		case types.UnsafePointer:
+			return g.Cast(g.Cast(g.AsLitInt(0), g.Uintptr), g.Selector(g.I("unsafe"), "Pointer"))
+		default:
+			panic("unreachable")
+		}
+	case *types.Named:
+		var pkg = v.Obj().Pkg()
+		if pkg != thisPkg {
+			g.Import(pkg.Path())
+		}
+		switch v.Underlying().(type) {
+		case *types.Struct, *types.Array:
+			return g.CompositeLiteral(g.I(v.Obj().Name()))()
+		default:
+			return g.Cast(g.ZeroValue(v.Underlying(), thisPkg), g.ValueTypeExpr(v, thisPkg))
+		}
+	case *types.Chan, *types.Interface,
+		*types.Map, *types.Pointer, *types.Signature,
+		*types.Slice:
+		return g.Nil
+	case *types.Struct, *types.Array:
+		return g.CompositeLiteral(g.ValueTypeExpr(v, thisPkg))()
+	default:
+		panic(fmt.Sprintf("unexpected types.Type: %#v", v))
 	}
 }
