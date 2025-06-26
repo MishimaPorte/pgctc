@@ -412,14 +412,61 @@ func (g *generatorState) renderValuer(typ types.Type, parent string, what, where
 	panic("unreachable")
 }
 
+// The handled forms of FromPOD methods are:
+// - func (s *Data) FromPOD(from T) error
+// - func (s *Data) FromPOD(from T)
+func (g *generatorState) handleFromPODMethod(parent string, meth *types.Func, place ast.Expr, from ast.Expr) ast.Stmt {
+	var sig = meth.Signature()
+	var res = sig.Results()
+	var params = sig.Params()
+
+	var variableName = "__Data_" + parent
+	var stmts []ast.Stmt
+	switch res.Len() {
+	case 0:
+		// func (s *Data) FromPOD(from T)
+		if params.Len() != 1 {
+			panic("bad argument count for ToPOD method")
+		}
+		var pod = params.At(0)
+		stmts = append(stmts,
+			g.VarDeclType(variableName, g.ValueTypeExpr(pod.Type(), pod.Pkg())),
+			g.renderScanner(pod.Type(), parent+"_POD", g.I(variableName), from),
+			g.Stmt(g.MethodCall(place, "FromPOD")(g.I(variableName))))
+	case 1:
+		// func (s *Data) FromPOD(from T) error
+		if params.Len() != 1 {
+			panic("FromPOD should have at least one argument")
+		}
+		var pod = params.At(0)
+		var errLoc = res.At(0)
+		if !impl(errLoc.Type(), errIface) {
+			panic("FromPOD should return error-implementing type, if any")
+		}
+		stmts = append(stmts,
+			g.VarDeclType(variableName, g.ValueTypeExpr(pod.Type(), pod.Pkg())),
+			g.renderScanner(pod.Type(), parent+"_POD", g.I(variableName), from),
+			g.If2(
+				g.Assign(g.Err)(
+					g.MethodCall(place, "FromPOD")(g.I(variableName))),
+				g.Neq(g.Err, g.Nil),
+			)(g.Return(g.Err)),
+		)
+	default:
+		panic("bad results count for FromPOD method")
+	}
+
+	return g.Block(stmts...)
+}
+
 // The function types supported are:
-// - [x] func (out *T)
-// - [ ] func (out *T) error
-// - [ ] func () T
-// - [x] func () T, error
+// - [x] func (m *Data) ToPOD(out *T)
+// - [x] func (m *Data) ToPOD(out *T) error
+// - [x] func (m *Data) ToPOD() T
+// - [x] func (m *Data) ToPOD() T, error
 //
 // where T is the actual type that gets processed and to the database.
-func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *types.Func, what ast.Expr, where ast.Expr) ast.Stmt {
+func (g *generatorState) handleToPODMethod(parent string, meth *types.Func, what ast.Expr, where ast.Expr) ast.Stmt {
 	var sig = meth.Signature()
 	var res = sig.Results()
 	var params = sig.Params()
@@ -427,43 +474,59 @@ func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *
 	var pod *types.Var
 	var errLoc *types.Var
 
+	var variableName = "__Data_" + parent
+
 	var stmts []ast.Stmt
 	switch res.Len() {
 	case 0:
+		// func (m *Data) ToPOD(out *T)
 		if params.Len() != 1 {
 			panic("bad argument count for ToPOD method")
 		}
 		pod = params.At(0)
-		var podElem = pod.Type().(*types.Pointer).Elem()
+		var podType = pod.Type()
+		var podPtr, ok = podType.(*types.Pointer)
+		if !ok {
+			panic(fmt.Sprintf("bad type as input argument: expected a pointer type, got %s", podType.String()))
+		}
+		var podElem = podPtr.Elem()
 		stmts = append(stmts,
-			g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem, g.nowPkg)),
-			g.Stmt(g.MethodCall(what, "ToPOD")(g.Reference(g.I("receivedPod")))),
-			g.renderValuer(podElem, parent, g.I("receivedPod"), where))
+			g.VarDeclType(variableName, g.ValueTypeExpr(podElem, g.nowPkg)),
+			g.Stmt(g.MethodCall(what, "ToPOD")(g.Reference(g.I(variableName)))),
+			g.renderValuer(podElem, parent, g.I(variableName), where))
 	case 1:
 		switch params.Len() {
 		case 0:
+			// func (m *Data) ToPOD() T
 			pod = res.At(0)
 			stmts = append(stmts,
-				g.VarDeclInit("receivedPod")(g.MethodCall(what, "ToPOD")()),
-				g.renderValuer(pod.Type(), parent, g.I("receivedPod"), where))
+				g.VarDeclInit(variableName)(g.MethodCall(what, "ToPOD")()),
+				g.renderValuer(pod.Type(), parent+"_POD", g.I(variableName), where))
 		case 1:
+			// func (m *Data) ToPOD(out *T) error
 			pod = params.At(0)
 			errLoc = res.At(0)
 			if !impl(errLoc.Type(), errIface) {
 				panic("the second return value for the ToPOD method shall be an error")
 			}
-			var podElem = pod.Type().(*types.Pointer).Elem()
+			var podType = pod.Type()
+			var podPtr, ok = podType.(*types.Pointer)
+			if !ok {
+				panic(fmt.Sprintf("bad type as input argument: expected a pointer type, got %s", podType.String()))
+			}
+			var podElem = podPtr.Elem()
 			stmts = append(stmts,
-				g.VarDeclType("receivedPod", g.ValueTypeExpr(podElem, g.nowPkg)),
+				g.VarDeclType(variableName, g.ValueTypeExpr(podElem, g.nowPkg)),
 				g.If2(
 					g.Assign(g.Err)(
 						g.MethodCall(what, "ToPOD")(
-							g.Reference(g.I("receivedPod")))),
+							g.Reference(g.I(variableName)))),
 					g.Neq(g.Err, g.Nil),
 				)(g.Return(g.Nil, g.Err)),
-				g.renderValuer(podElem, parent, g.I("receivedPod"), where))
+				g.renderValuer(podElem, parent, g.I(variableName), where))
 		}
 	case 2:
+		// func (m *Data) ToPOD() T, error
 		if params.Len() != 0 {
 			panic("bad argument count for ToPOD method")
 		}
@@ -473,12 +536,12 @@ func (g *generatorState) handleToPODMethod(v *types.Named, parent string, meth *
 			panic("the second return value for the ToPOD method shall be an error")
 		}
 		stmts = append(stmts,
-			g.VarDeclInit("receivedPod", "err")(
+			g.VarDeclInit(variableName, "err")(
 				g.MethodCall(what, "ToPOD")()),
 			g.If(
 				g.Neq(g.Err, g.Nil),
 			)(g.Return(g.Nil, g.Err)),
-			g.renderValuer(pod.Type(), parent, g.I("receivedPod"), where))
+			g.renderValuer(pod.Type(), parent, g.I(variableName), where))
 	default:
 		panic("bad results count for ToPOD method")
 	}
@@ -489,7 +552,7 @@ func (g *generatorState) handleNamedValuer(v *types.Named, parent string, what a
 	// The ToPOD method takes precedence
 	var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "ToPOD")
 	if method != nil {
-		return g.handleToPODMethod(v, parent, method.(*types.Func), what, where)
+		return g.handleToPODMethod(parent, method.(*types.Func), what, where)
 	}
 
 	var pkg = g.makepkg(v.Obj().Pkg().Path())
@@ -574,6 +637,12 @@ func (g *generatorState) renderScanner(typ types.Type, namelet string, place, fr
 			g.Stmt(g.FuncCall("copy")(
 				g.Slice2(place, 0, int(v.Len())), sliceAsArray)))
 	case *types.Named:
+
+		// The ToPOD method takes precedence
+		var method, _, _ = types.LookupFieldOrMethod(v, true, v.Obj().Pkg(), "FromPOD")
+		if method != nil {
+			return g.handleFromPODMethod(namelet, method.(*types.Func), place, from)
+		}
 		var pkg = g.makepkg(v.Obj().Pkg().Path())
 		if pkg.isGenerated {
 			// For packages that we do actually care about we may generate
@@ -1717,6 +1786,7 @@ func setLogLevel() {
 // TODO: take all the ast-centric things out into a library and make it more general than
 // whatever is needed here.
 func main() {
+
 	var fset = token.NewFileSet()
 	var g generatorState
 	g.importer = importer.ForCompiler(fset, "source", nil)
